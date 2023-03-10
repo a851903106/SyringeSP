@@ -647,6 +647,7 @@ void SyringeDebugger::FindDLLs()
 {
 	Breakpoints.clear();
 	HookBuffer buffer_Inj;
+	HookBuffer buffer_Override;
 
 	for (auto file = FindFile("*.dll"); file; ++file) {
 		std::string_view const fn(file->cFileName);
@@ -667,9 +668,16 @@ void SyringeDebugger::FindDLLs()
 				Log::WriteLine(
 					__FUNCTION__ ": Recognized DLL: \"%.*s\"", printable(fn));
 
-				if (!ParseInjFileHooks(fn, buffer_Inj)) {
+				const auto  excludeInj = ".exinj";
+				if (!ParseInjFileHooks(fn, buffer_Inj , excludeInj)) {
 					Log::WriteLine(
-						__FUNCTION__ ": Failed Parsing DLL.inj: \"%.*s\"", printable(fn));
+						__FUNCTION__ ": Failed Parsing DLL.exinj: \"%.*s\"", printable(fn));
+				}
+
+				if (auto const hooks = DLL.FindSection(".syhks01")) {
+					if(ParseOverrideHooksSection(DLL, *hooks, buffer_Inj , buffer_Override))
+					Log::WriteLine(
+						__FUNCTION__ ": Found Override Hook Section : \"%.*s\"", printable(fn));
 				}
 
 				if (auto const res = Handshake(
@@ -709,44 +717,47 @@ void SyringeDebugger::FindDLLs()
 	v_AllHooks.clear();
 	for (auto& it : Breakpoints)
 	{
-		for (auto& i : it.second.hooks)
+		for (size_t i = 0; i < it.second.hooks.size(); ++i)
 		{
-			v_AllHooks.push_back(&i);
-			//MessageBoxA(
-			//	nullptr, "Syringe Is summarize all hooks",
-			//	reinterpret_cast<LPCSTR>(i.proc_address), MB_OK | MB_ICONINFORMATION);
+			auto& nBreakHook = it.second.hooks.at(i);
 
-		}
-	}
+			for (auto& nIgnoreData : buffer_Inj.hooks) {
+				auto& nReplace = buffer_Override.hooks.at(nIgnoreData.first);
+				int iPos_buffer_internal = 0;
 
-	for (auto& nIgnoreData : buffer_Inj.hooks) {
-		for(auto& nVec : nIgnoreData.second){
-			auto const iter = std::find_if(v_AllHooks.begin(), v_AllHooks.end(),[&](SyringeDebugger::Hook* i) {		
-				return (_strcmpi(i->lib, nVec.lib) == 0)
-					&& i->hookaddr == nVec.hookaddr
-					&& (_strcmpi(i->proc , nVec.proc) == 0)
-					&& i->num_overridden == i->num_overridden;
-			});
+				for (auto& nVec : nIgnoreData.second) {
 
-			if (iter != v_AllHooks.end()) {
-				auto const pHookData = (*iter);
-				Log::WriteLine(__FUNCTION__ ": hook [%s][0x%x = %s , %d] Removed .", pHookData->lib, pHookData->hookaddr, pHookData->proc, pHookData->num_overridden);
-				v_AllHooks.erase(iter);
+					if ((_strcmpi(nBreakHook.lib, nVec.lib) == 0) && //same dll
+						nBreakHook.hookaddr == nVec.hookaddr)// same address
+						//&& (_strcmpi(i->proc , nVec.proc) == 0)
+						//&& i->num_overridden == i->num_overridden
+					{
+						Log::WriteLine(__FUNCTION__ ": hook [%s][0x%x = %s , %d] Removed .", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
+						auto& nVecHere = nReplace.at(iPos_buffer_internal);
+						nBreakHook = nVecHere;
+						Log::WriteLine(__FUNCTION__ ": hook [%s][0x%x = %s , %d] Re-Applied .", nVecHere.lib, nVecHere.hookaddr, nVecHere.proc, nVecHere.num_overridden);
+					}
+					++iPos_buffer_internal;
+				}
 			}
+
+			v_AllHooks.push_back(&nBreakHook);
 		}
 	}
+
+
 
 	Log::WriteLine(__FUNCTION__ ": Done (%d hooks added).", v_AllHooks.size());
 	Log::WriteLine();
 }
 
 bool SyringeDebugger::ParseInjFileHooks(
-	std::string_view const lib, HookBuffer& hooks)
+	std::string_view const lib, HookBuffer& hooks , const char* extension)
 {
-	auto const inj = std::string(lib) + ".inj";
+	auto const inj = std::string(lib) + extension;
 
 	if (auto const file = FileHandle(_fsopen(inj.c_str(), "r", _SH_DENYWR))) {
-		Log::WriteLine(__FUNCTION__ ": %s inj file Found , Parsing." , lib);
+		Log::WriteLine(__FUNCTION__ ": %s %s file Found , Parsing." , lib , extension);
 
 		constexpr auto Size = 0x100;
 		char line[Size];
@@ -827,6 +838,46 @@ bool SyringeDebugger::ParseHooksSection(
 				if (DLL.ReadCString(rawNamePtr, hookName)) {
 					//Log::WriteLine(__FUNCTION__ ": [%s]Hook, %x=%s, %x", DLL.GetFilename(), h.hookAddr, hookName.c_str(), h.hookSize);
 					buffer.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
+				}
+			}
+		}
+		else {
+			Log::WriteLine(__FUNCTION__ ": Bytes read failed");
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool SyringeDebugger::ParseOverrideHooksSection(
+	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks,
+	HookBuffer& overriderBuffer , HookBuffer& supposehook)
+{
+	constexpr auto const Size = sizeof(hookdecl);
+	auto const base = DLL.GetImageBase();
+	auto const filename = std::string_view(DLL.GetFilename());
+
+	auto const begin = hooks.PointerToRawData;
+	auto const end = begin + hooks.SizeOfRawData;
+
+	std::string hookName{};
+	hookName.reserve(0x800);
+
+	std::string moduleName{};
+	moduleName.reserve(0x800);
+
+	for (auto ptr = begin; ptr < end; ptr += Size) {
+		overridehookdecl h{};
+		if (DLL.ReadBytes(ptr, Size, &h)) {
+			// msvc linker inserts arbitrary padding between variables that come
+			// from different translation units
+			if (h.hookNamePtr && h.overrideModuleName) {
+				auto const rawNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
+				auto const rawModuleNamePtr = DLL.VirtualToRaw(h.overrideModuleName - base);
+				if (DLL.ReadCString(rawNamePtr, hookName) && DLL.ReadCString(rawModuleNamePtr,moduleName)) {
+					overriderBuffer.add(reinterpret_cast<void*>(h.hookAddr), moduleName, hookName, h.hookSize);
+					supposehook.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
 				}
 			}
 		}

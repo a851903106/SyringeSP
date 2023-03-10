@@ -134,6 +134,7 @@
       <ControlFlowGuard>Guard</ControlFlowGuard>
       <EnableModules>false</EnableModules>
       <TreatWarningAsError>true</TreatWarningAsError>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>

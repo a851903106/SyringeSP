@@ -207,9 +207,10 @@ private:
 		{ return hooks.size(); }
 	};
 
-	bool ParseInjFileHooks(std::string_view lib, HookBuffer& hooks);
+	bool ParseInjFileHooks(std::string_view lib, HookBuffer& hooks, const char* extension);
 	bool CanHostDLL(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hosts) const;
 	bool ParseHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer);
+	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer, HookBuffer& overriderBuffer);
 	bool Handshake(std::string_view lib, int hooks, unsigned int crc);
 };
 
@@ -220,6 +221,13 @@ struct alignas(16) hookdecl {
 	unsigned int hookAddr;
 	unsigned int hookSize;
 	DWORD hookNamePtr;
+};
+
+struct alignas(16) overridehookdecl {
+	unsigned int hookAddr;
+	unsigned int hookSize;
+	DWORD hookNamePtr;
+	DWORD overrideModuleName;
 };
 
 struct alignas(16) hostdecl {
