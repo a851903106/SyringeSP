@@ -15,7 +15,7 @@
 #include <DbgHelp.h>
 
 using namespace std;
-std::vector<std::string> SyringeDebugger::IgnoredDlls{};
+std::vector<std::string> SyringeDebugger::IgnoredDll;
 //TODO : Other Type of hook supports !
 
 void SyringeDebugger::DebugProcess(std::string_view const arguments)
@@ -643,6 +643,15 @@ void SyringeDebugger::RetrieveInfo()
 	//	__FUNCTION__, MB_OK | MB_ICONINFORMATION);
 }
 
+#include <sstream>
+
+std::string convert_int(int n)
+{
+	std::stringstream ss;
+	ss << n;
+	return ss.str();
+}
+
 void SyringeDebugger::FindDLLs()
 {
 	Breakpoints.clear();
@@ -652,6 +661,13 @@ void SyringeDebugger::FindDLLs()
 	for (auto file = FindFile("*.dll"); file; ++file) {
 		std::string_view const fn(file->cFileName);
 
+		if (!IgnoredDll.empty()) {
+			const auto Iter = std::find_if(IgnoredDll.begin(), IgnoredDll.end(), [&](const auto& nStr) { return nStr == fn; });
+			if (Iter != IgnoredDll.end()) {
+				Log::WriteLine(__FUNCTION__ ": Ignoring DLL: \"%.*s\"", printable(fn));
+				continue;
+			}
+		}
 		//Log::WriteLine(
 		//	__FUNCTION__ ": Potential DLL: \"%.*s\"", printable(fn));
 
@@ -715,41 +731,80 @@ void SyringeDebugger::FindDLLs()
 
 	// summarize all hooks
 	v_AllHooks.clear();
-	for (auto& it : Breakpoints)
+	SyringeDebugger::RemoveBreakPoints(Breakpoints, buffer_Inj, buffer_Override);
+	for (auto& it : Breakpoints) {
+		for (auto& data : it.second.hooks) {
+
+			auto const nTempData = convert_int(data.hookaddr);
+
+			if ((nTempData.size() + 1) != 8){
+				Log::WriteLine(__FUNCTION__ ": Found Hook with less or more than 8 characters , it maybe invalid one [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
+			}
+
+			if(data.num_overridden == 0)
+				Log::WriteLine(__FUNCTION__ ": Found Hook with 0 num overriden , it maybe better to explicitly put the correct num overriden [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
+			else if (data.num_overridden < 5)
+				Log::WriteLine(__FUNCTION__ ": Found Hook with less than 5 bytes num overriden , it maybe better to move the hook location if possible [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
+
+			v_AllHooks.push_back(&data);
+		}
+
+		if (it.second.hooks.size() > 1)
+			Log::WriteLine(__FUNCTION__ ":[Addr - 0x%x] Is Hooked by %d function !.", it.first, it.second.hooks.size());
+	}
+
+	Log::WriteLine(__FUNCTION__ ": Done (%d hooks added).", v_AllHooks.size());
+	Log::WriteLine();
+}
+
+void SyringeDebugger::RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData, HookBuffer& reapplyHooksData)
+{
+	for (auto& it : breakpoints)
 	{
 		for (size_t i = 0; i < it.second.hooks.size(); ++i)
 		{
 			auto& nBreakHook = it.second.hooks.at(i);
 
-			for (auto& nIgnoreData : buffer_Inj.hooks) {
-				auto& nReplace = buffer_Override.hooks.at(nIgnoreData.first);
-				int iPos_buffer_internal = 0;
-
+			for (auto& nIgnoreData : excludeHooksData.hooks) {
 				for (auto& nVec : nIgnoreData.second) {
+
+					//Log::WriteLine(__FUNCTION__ ":[Sizeof TempData 0x%x - %d ].", nVec.hookaddr , nTempData.size());
 
 					if ((_strcmpi(nBreakHook.lib, nVec.lib) == 0) && //same dll
 						nBreakHook.hookaddr == nVec.hookaddr)// same address
 						//&& (_strcmpi(i->proc , nVec.proc) == 0)
 						//&& i->num_overridden == i->num_overridden
 					{
-						Log::WriteLine(__FUNCTION__ ": hook [%s][0x%x = %s , %d] Removed .", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
-						auto& nVecHere = nReplace.at(iPos_buffer_internal);
-						nBreakHook = nVecHere;
-						Log::WriteLine(__FUNCTION__ ": hook [%s][0x%x = %s , %d] Re-Applied .", nVecHere.lib, nVecHere.hookaddr, nVecHere.proc, nVecHere.num_overridden);
+						bool Found = false;
+						if (reapplyHooksData.hooks.contains(nIgnoreData.first))
+						{
+							auto& nReplace = reapplyHooksData.hooks[nIgnoreData.first];
+							auto const IterHere = std::find_if(nReplace.begin(), nReplace.end(), [&](auto const& Data) {return nBreakHook.hookaddr == Data.hookaddr; });
+
+							if (IterHere != nReplace.end()) {
+								Found = true;
+								nBreakHook = (*IterHere);
+								Log::WriteLine(__FUNCTION__ ":[ Replacing %s -> %s][0x%x = %s , %d] hook.", nVec.lib , (*IterHere).lib, (*IterHere).hookaddr, (*IterHere).proc, (*IterHere).num_overridden);
+							}
+						}
+
+						if (!Found)
+						{
+							Log::WriteLine(__FUNCTION__ ":[ Removing %s][0x%x = %s , %d] hook.", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
+							it.second.hooks.erase(it.second.hooks.begin() + i);
+						}
 					}
-					++iPos_buffer_internal;
+					//else if (nBreakHook.hookaddr == 0x0)
+					//{
+					//	Log::WriteLine(__FUNCTION__ ":[ Removing %s][0x%x = %s , %d] hook.", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
+					//	it.second.hooks.erase(it.second.hooks.begin() + i);
+					//}
 				}
 			}
-
-			v_AllHooks.push_back(&nBreakHook);
 		}
 	}
-
-
-
-	Log::WriteLine(__FUNCTION__ ": Done (%d hooks added).", v_AllHooks.size());
-	Log::WriteLine();
 }
+
 
 bool SyringeDebugger::ParseInjFileHooks(
 	std::string_view const lib, HookBuffer& hooks , const char* extension)
@@ -877,7 +932,9 @@ bool SyringeDebugger::ParseOverrideHooksSection(
 				auto const rawModuleNamePtr = DLL.VirtualToRaw(h.overrideModuleName - base);
 				if (DLL.ReadCString(rawNamePtr, hookName) && DLL.ReadCString(rawModuleNamePtr,moduleName)) {
 					overriderBuffer.add(reinterpret_cast<void*>(h.hookAddr), moduleName, hookName, h.hookSize);
-					supposehook.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
+					
+					if(h.hookSize != -1)
+						supposehook.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
 				}
 			}
 		}
@@ -900,7 +957,8 @@ bool SyringeDebugger::Handshake(
 	bool ret = false;
 
 	if (!lib.empty()) {
-		if (!lib.contains("cncnet")) {
+		//if (!lib.contains("cncnet"))
+		{
 			if (auto const nDllLib = LoadLibrary(lib.data())) {
 				if (auto const func = reinterpret_cast<SYRINGEHANDSHAKEFUNC>(
 					GetProcAddress(nDllLib, "SyringeHandshake")))
@@ -938,10 +996,10 @@ bool SyringeDebugger::Handshake(
 				FreeLibrary(nDllLib);
 			}
 		}
-		else {
-			SyringeDebugger::IgnoredDlls.push_back(lib.data());
-			Log::WriteLine(__FUNCTION__ ": %s Ignored.", lib.data());
-		}
+		//else {
+		//	SyringeDebugger::IgnoredDlls.push_back(lib.data());
+		//	Log::WriteLine(__FUNCTION__ ": %s Ignored.", lib.data());
+		//}
 	}
 
 	return ret;

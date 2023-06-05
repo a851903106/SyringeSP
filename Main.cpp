@@ -6,18 +6,59 @@
 
 #include <commctrl.h>
 #include <iostream>
+#include "ini-rw/include/IniFile.hpp"
 
 int Run(std::string_view const arguments) {
-	constexpr auto const VersionString = "Syringe 0.7.2.0";
+	constexpr auto const VersionString = "Syringe 0.7.2.0 - Custom";
 
 	InitCommonControls();
 
 	Log::Open("syringe.log");
+	inirw::IniFile iniFile("syringeconfig.ini");
 
 	Log::WriteLine(VersionString);
 	Log::WriteLine("===============");
 	Log::WriteLine();
 	Log::WriteLine("WinMain: arguments = \"%.*s\"", printable(arguments));
+
+	Log::WriteLine(
+		"WinMain: try to find syringeconfig");
+
+	if (iniFile) {
+
+		if (inirw::IniKey* iniKey = iniFile.get_key_and_name("General", "IgnorableDlls")) {
+
+			if (iniKey)
+			{
+				std::string nRes = iniKey->ValueCommentPair.get_value();
+
+				char* context = nullptr;
+				for (char* cur = strtok_s(nRes.data(), ",", &context);
+					cur;
+					cur = strtok_s(nullptr, ",", &context))
+				{
+					SyringeDebugger::IgnoredDll.push_back(cur);
+				}
+			}
+			else {
+				Log::WriteLine(
+					"WinMain: IgnorableDlls is empty ");
+			}
+
+		}
+		else {
+			Log::WriteLine(
+				"WinMain: Key not found ");
+		}
+
+	}
+	else {
+		Log::WriteLine(
+			"WinMain: could not find syringeconfig.ini ");
+	}
+
+	Log::WriteLine(
+		"WinMain: find syringeconfig done");
 
 	auto failure = "Could not load executable.";
 	auto exit_code = ERROR_ERRORS_ENCOUNTERED;
@@ -26,7 +67,7 @@ int Run(std::string_view const arguments) {
 	{
 		auto const command = get_command_line(arguments);
 
-		if(!command.flags.empty()) {
+		if (!command.flags.empty()) {
 			// artificial limitation
 			throw invalid_command_arguments{};
 		}
@@ -56,7 +97,7 @@ int Run(std::string_view const arguments) {
 		Log::WriteLine("WinMain: Exiting on success.");
 		return ERROR_SUCCESS;
 	}
-	catch(lasterror const& e)
+	catch (lasterror const& e)
 	{
 		auto const message = replace(e.message, "%1", e.insert);
 		Log::WriteLine("WinMain: %s (%d)", message.c_str(), e.error);
@@ -66,7 +107,7 @@ int Run(std::string_view const arguments) {
 
 		exit_code = static_cast<long>(e.error);
 	}
-	catch(invalid_command_arguments const&)
+	catch (invalid_command_arguments const&)
 	{
 		MessageBoxA(
 			nullptr, "Syringe cannot be run just like that.\n\n"
@@ -85,11 +126,8 @@ int Run(std::string_view const arguments) {
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
 {
-	UNREFERENCED_PARAMETER(hInstance);
-	UNREFERENCED_PARAMETER(hPrevInstance);
-	
-	Log::WriteLine(
-		"WinMain:nCmdShow [%d]", nCmdShow);
+	//UNREFERENCED_PARAMETER(hInstance);
+	//UNREFERENCED_PARAMETER(hPrevInstance);
 
 	//MessageBoxA(
 	//	nullptr, "Syringe Is halted before run",

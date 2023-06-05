@@ -133,8 +133,9 @@
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <ControlFlowGuard>Guard</ControlFlowGuard>
       <EnableModules>false</EnableModules>
-      <TreatWarningAsError>true</TreatWarningAsError>
+      <TreatWarningAsError>false</TreatWarningAsError>
       <IntrinsicFunctions>true</IntrinsicFunctions>
+      <BuildStlModules>false</BuildStlModules>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -158,6 +159,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CRC32.cpp" />
+    <ClCompile Include="ini-rw\src\algorithms\Parse.cpp" />
+    <ClCompile Include="ini-rw\src\algorithms\Search.cpp" />
+    <ClCompile Include="ini-rw\src\algorithms\Validation.cpp" />
+    <ClCompile Include="ini-rw\src\entities\IniKey.cpp" />
+    <ClCompile Include="ini-rw\src\entities\IniSection.cpp" />
+    <ClCompile Include="ini-rw\src\entities\IniValueCommentPair.cpp" />
+    <ClCompile Include="ini-rw\src\IniFile.cpp" />
     <ClCompile Include="Log.cpp" />
     <ClCompile Include="Main.cpp" />
     <ClCompile Include="PortableExecutable.cpp" />

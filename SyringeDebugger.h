@@ -16,12 +16,14 @@
 class SyringeDebugger
 {
 	static constexpr size_t MaxNameLength = 0x500u;
-
 	static constexpr BYTE INIT = 0x00;
 	static constexpr BYTE INT3 = 0xCC; // trap to debugger interrupt opcode.
 	static constexpr BYTE NOP = 0x90;
-	static std::vector<std::string> IgnoredDlls;
+
 public:
+
+	static std::vector<std::string> IgnoredDll;
+
 	SyringeDebugger(std::string_view filename)
 		: exe(filename)
 	{
@@ -212,6 +214,8 @@ private:
 	bool ParseHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer);
 	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer, HookBuffer& overriderBuffer);
 	bool Handshake(std::string_view lib, int hooks, unsigned int crc);
+protected : 
+	static void __declspec(noinline) RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData, HookBuffer& reapplyHooksData);
 };
 
 // disable "structures padded due to alignment specifier"
