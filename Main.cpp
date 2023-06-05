@@ -28,10 +28,9 @@ int Run(std::string_view const arguments) {
 
 		if (inirw::IniKey* iniKey = iniFile.get_key_and_name("General", "IgnorableDlls")) {
 
-			if (iniKey)
-			{
-				std::string nRes = iniKey->ValueCommentPair.get_value();
+			std::string nRes = iniKey->ValueCommentPair.get_value();
 
+			if (nRes.empty()) {			
 				char* context = nullptr;
 				for (char* cur = strtok_s(nRes.data(), ",", &context);
 					cur;
