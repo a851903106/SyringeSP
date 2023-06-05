@@ -125,8 +125,9 @@ int Run(std::string_view const arguments) {
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
 {
-	//UNREFERENCED_PARAMETER(hInstance);
-	//UNREFERENCED_PARAMETER(hPrevInstance);
+	UNREFERENCED_PARAMETER(hInstance);
+	UNREFERENCED_PARAMETER(hPrevInstance);
+	UNREFERENCED_PARAMETER(nCmdShow);
 
 	//MessageBoxA(
 	//	nullptr, "Syringe Is halted before run",
