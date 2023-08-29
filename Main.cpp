@@ -30,7 +30,7 @@ int Run(std::string_view const arguments) {
 
 			std::string nRes = iniKey->ValueCommentPair.get_value();
 
-			if (!nRes.empty()) {			
+			if (!nRes.empty()) {
 				char* context = nullptr;
 				for (char* cur = strtok_s(nRes.data(), ",", &context);
 					cur;

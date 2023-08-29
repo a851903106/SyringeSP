@@ -13,14 +13,38 @@
 
 #include <windows.h>
 
+static constexpr size_t MaxNameLength = 0x100u;
+static constexpr BYTE INIT = 0x00;
+static constexpr BYTE INT3 = 0xCC; // trap to debugger interrupt opcode.
+static constexpr BYTE NOP = 0x90;
+
+static constexpr BYTE const cLoadLibrary[] =
+{
+	0x50, // push eax
+	0x51, // push ecx
+	0x52, // push edx
+	0x68, INIT, INIT, INIT, INIT, // push offset pdLibName
+	0xFF, 0x15, INIT, INIT, INIT, INIT, // call pImLoadLibrary
+	0x85, 0xC0, // test eax, eax
+	0x74, 0x0C, // jz
+	0x68, INIT, INIT, INIT, INIT, // push offset pdProcName
+	0x50, // push eax
+	0xFF, 0x15, INIT, INIT, INIT, INIT, // call pdImGetProcAddress
+	0xA3, INIT, INIT, INIT, INIT, // mov pdProcAddress, eax
+	0x5A, // pop edx
+	0x59, // pop ecx
+	0x58, // pop eax
+	INT3, NOP // int3 and some padding
+};
+
+static constexpr size_t SizeOfLoadLib = sizeof(cLoadLibrary);
+
 class SyringeDebugger
 {
-	static constexpr size_t MaxNameLength = 0x500u;
-	static constexpr BYTE INIT = 0x00;
-	static constexpr BYTE INT3 = 0xCC; // trap to debugger interrupt opcode.
-	static constexpr BYTE NOP = 0x90;
-
 public:
+
+	using dllptr = void*;
+	using eipptr = void*;
 
 	static std::vector<std::string> IgnoredDll;
 
@@ -83,7 +107,7 @@ private:
 	void DebugProcess(std::string_view arguments);
 
 	// helper Functions
-	static DWORD __fastcall RelativeOffset(void const* from, void const* to);
+	static DWORD __fastcall GetRelativeOffset(void const* from, void const* to);
 
 	template<typename T>
 	static void ApplyPatch(void* ptr, T&& data) noexcept
@@ -91,6 +115,10 @@ private:
 		std::memcpy(ptr, &data, sizeof(data));
 	}
 
+	template<typename T>
+	static void ApplyPatch(void* ptr, T&& data , size_t size) noexcept {
+		std::memcpy(ptr, &data, size);
+	}
 	// thread info
 	struct ThreadInfo
 	{
@@ -116,12 +144,30 @@ private:
 	struct Hook
 	{
 		unsigned int hookaddr;
-		char lib[MaxNameLength];
-		char proc[MaxNameLength];
-		void* proc_address;
+		char lib[MaxNameLength]; //module name
+		char proc[MaxNameLength]; //hook real name
+		void* proc_address;	//hook address
 
 		size_t num_overridden;
 	};
+
+	struct Patch {
+		unsigned int addr;
+		char lib[MaxNameLength]; //module name
+		char proc[MaxNameLength]; //patch real name
+		BYTE* Data;
+		size_t DataSize;
+
+		void ApplyPatch() const {
+			DWORD protect_flag;
+			VirtualProtect((eipptr)addr, this->DataSize, PAGE_EXECUTE_READWRITE, &protect_flag);
+			memcpy((eipptr)addr, this->Data, this->DataSize);
+			VirtualProtect((eipptr)addr, this->DataSize, protect_flag, 0);
+		}
+	};
+
+	static std::vector<Patch> Patched;
+	void ApplyPatches();
 
 	struct BreakpointInfo
 	{
@@ -152,7 +198,7 @@ private:
 
 	// data addresses
 	struct AllocData {
-		static constexpr auto CodeSize = 0x40u;
+		static constexpr size_t CodeSize = 0x39u;
 		std::byte LoadLibraryFunc[CodeSize];
 		void* ProcAddress;
 		void* ReturnEIP;
@@ -165,7 +211,7 @@ private:
 	};
 
 	struct HookBuffer {
-		std::map<void*, std::vector<Hook>> hooks;
+		std::map<eipptr, std::vector<Hook>> hooks;
 		CRC32 checksum;
 		size_t count{ 0 };
 
@@ -196,7 +242,52 @@ private:
 		{
 			if (!hooks.contains(eip))
 				return;
-			
+
+			auto& nHookv = hooks.at(eip);
+			for (size_t i = 0; i < nHookv.size(); ++i) {
+				if (proc == nHookv.at(i).proc) {
+					nHookv.erase(nHookv.begin() + i);
+				}
+			}
+		}
+
+		size_t GetCurentSize() const
+		{ return hooks.size(); }
+	};
+
+	struct PatchBuffer {
+		std::map<eipptr, std::vector<Patch>> hooks;
+		CRC32 checksum;
+		size_t count{ 0 };
+
+		void add(void* const eip, Patch const& hook) {
+			auto& h = hooks[eip];
+			h.push_back(hook);
+
+			checksum.compute(&eip, sizeof(eip));
+			checksum.compute(&hook.DataSize, sizeof(hook.DataSize));
+			count++;
+		}
+
+		void add(
+			void* const eip, std::string_view const filename,
+			std::string_view const proc, size_t const DataSize , BYTE* const data)
+		{
+			Patch patch;
+			patch.lib[filename.copy(patch.lib, std::size(patch.lib) - 1)] = '\0';
+			patch.proc[proc.copy(patch.proc, std::size(patch.proc) - 1)] = '\0';
+			patch.Data = data;
+			patch.DataSize = DataSize;
+			patch.addr = (size_t)eip;
+
+			add(eip, patch);
+		}
+
+		void remove(std::string_view const proc, void* const eip)
+		{
+			if (!hooks.contains(eip))
+				return;
+
 			auto& nHookv = hooks.at(eip);
 			for (size_t i = 0; i < nHookv.size(); ++i) {
 				if (proc == nHookv.at(i).proc) {
@@ -213,8 +304,10 @@ private:
 	bool CanHostDLL(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hosts) const;
 	bool ParseHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer);
 	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer, HookBuffer& overriderBuffer);
+	bool ParsePatchSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, PatchBuffer& buffer);
+
 	bool Handshake(std::string_view lib, int hooks, unsigned int crc);
-protected : 
+protected :
 	static void __declspec(noinline) RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData, HookBuffer& reapplyHooksData);
 };
 
@@ -224,6 +317,13 @@ protected :
 struct alignas(16) hookdecl {
 	unsigned int hookAddr;
 	unsigned int hookSize;
+	DWORD hookNamePtr;
+};
+
+struct alignas(16) patchdecl {
+	unsigned int patchAddr;
+	DWORD patchData;
+	unsigned int patchDataSize;
 	DWORD hookNamePtr;
 };
 

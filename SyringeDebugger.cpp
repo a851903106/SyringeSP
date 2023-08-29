@@ -14,10 +14,32 @@
 
 #include <DbgHelp.h>
 
-using namespace std;
+//using namespace std;
 std::vector<std::string> SyringeDebugger::IgnoredDll;
+std::vector<SyringeDebugger::Patch> SyringeDebugger::Patched;
+
+void SyringeDebugger::ApplyPatches() {
+	for (auto const& Patch : Patched) {
+		if (!Patch.Data)
+			continue;
+
+		MessageBoxA(
+			nullptr, "Syringe Is halted before run",
+			reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
+
+		Log::WriteLine(
+			__FUNCTION__ ": ApplyPatch from: %s "
+			"- %s", Patch.lib, Patch.proc);
+		Patch.ApplyPatch();
+	}
+}
 //TODO : Other Type of hook supports !
 
+/*
+*	Apply patch:
+*	Type -> raw
+*		 -> address
+*/
 void SyringeDebugger::DebugProcess(std::string_view const arguments)
 {
 	STARTUPINFO startupInfo{ sizeof(startupInfo) };
@@ -67,7 +89,7 @@ bool SyringeDebugger::SetBP(void* address)
 	return true;
 }
 
-DWORD __fastcall SyringeDebugger::RelativeOffset(void const* pFrom, void const* pTo)
+DWORD __fastcall SyringeDebugger::GetRelativeOffset(void const* pFrom, void const* pTo)
 {
 	auto const from = reinterpret_cast<DWORD>(pFrom);
 	auto const to = reinterpret_cast<DWORD>(pTo);
@@ -160,6 +182,22 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 			{
 				Log::WriteLine(__FUNCTION__ ": Creating code hooks.");
 
+				//SyringeDebugger::ApplyPatches();
+
+				//constexpr static BYTE const code_call[] =
+				//{
+				//	0x60, 0x9C, // PUSHAD, PUSHFD
+				//	0x68, INIT, INIT, INIT, INIT, // PUSH HookAddress
+				//	0x54, // PUSH ESP
+				//	0xE8, INIT, INIT, INIT, INIT, // CALL ProcAddress
+				//	0x83, 0xC4, 0x08, // ADD ESP, 8
+				//	0xA3, INIT, INIT, INIT, INIT, // MOV ds:ReturnEIP, EAX
+				//	0x9D, 0x61, // POPFD, POPAD
+				//	0x83, 0x3D, INIT, INIT, INIT, INIT, 0x00, // CMP ds:ReturnEIP, 0
+				//	0x74, 0x06, // JZ .proceed
+				//	0xFF, 0x25, INIT, INIT, INIT, INIT, // JMP ds:ReturnEIP
+				//};
+
 				constexpr static BYTE const code_call[] =
 				{
 					0x60, 0x9C, // PUSHAD, PUSHFD
@@ -167,89 +205,107 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					0x54, // PUSH ESP
 					0xE8, INIT, INIT, INIT, INIT, // CALL ProcAddress
 					0x83, 0xC4, 0x08, // ADD ESP, 8
-					0xA3, INIT, INIT, INIT, INIT, // MOV ds:ReturnEIP, EAX
+					0x89, 0x44, 0x24, 0xFC, // MOV ds:ReturnEIP, EAX
 					0x9D, 0x61, // POPFD, POPAD
-					0x83, 0x3D, INIT, INIT, INIT, INIT, 0x00, // CMP ds:ReturnEIP, 0
-					0x74, 0x06, // JZ .proceed
-					0xFF, 0x25, INIT, INIT, INIT, INIT, // JMP ds:ReturnEIP
+					0x83, 0x7C, 0x24, 0xD8, 0x00, // CMP ds:ReturnEIP, 0
+					0x74, 0x04, // JZ .proceed
+					0xFF, 0x64, 0x24 , 0xD8 , INIT , INIT , INIT// JMP ds:ReturnEIP
 				};
+
+				static_assert(sizeof(code_call) == 36u, "Invalid Size!");
 
 				constexpr static BYTE const jmp_back[] = { 0xE9, INIT, INIT, INIT, INIT };
 				constexpr static BYTE const jmp[] = { 0xE9, INIT, INIT, INIT, INIT };
 
+				//temporary vector for code Byte
 				std::vector<BYTE> code{};
 				int acount = 0;
 
-				for (auto& [entry, breaks] : Breakpoints)
+				for (auto& [breakpoints_entry, breakpoins_breaks] : Breakpoints)
 				{
 					++acount;
-					if (entry == nullptr || entry == pcEntryPoint)
-					{
+					if (breakpoints_entry == nullptr || breakpoints_entry == pcEntryPoint) {
 						continue;
-					}				
+					}
 
-					auto const [count, overridden] = std::accumulate(breaks.hooks.cbegin(), breaks.hooks.cend(), std::make_pair(0u, 0u), [](auto acc, auto const& hook)
-					{
+					//accumulate all hooks
+					// param :
+					// const begin of BreakpointInfo
+					// const end of BreakpointInfo
+					// default init value
+					// bynary operation
+					struct HooksAccumulateData 	{
+						size_t count;
+						size_t numOverriden;
+					};
+
+					// count = how much hook is present
+					// overridden = number of overriden of the hook
+					HooksAccumulateData hooks_ = std::accumulate(breakpoins_breaks.hooks.cbegin(), breakpoins_breaks.hooks.cend(),
+						HooksAccumulateData(0u, 0u), [](HooksAccumulateData acc, Hook const& hook)
+						{
 							if (hook.proc_address)
 							{
-								if (acc.second < hook.num_overridden) {
-									acc.second = hook.num_overridden;
+								if (acc.numOverriden < hook.num_overridden) {
+									acc.numOverriden = hook.num_overridden;
 								}
-								acc.first++;
+								acc.count++;
 							}
 
-						return acc;
-					});
+							return acc;
+						});
 
-					if (!count)
+					if (!hooks_.count)
 					{
 						continue;
 					}
 
-					auto const sz = (count * sizeof(code_call))
-						+ sizeof(jmp_back) + overridden;
+					//calculate final sizes
+					auto const sz = (hooks_.count * sizeof(code_call))
+						+ sizeof(jmp_back) + hooks_.numOverriden;
 
 					code.resize(sz);
 					auto p_code = code.data();
 
-					breaks.p_caller_code = AllocMem(nullptr, sz);
-					auto const base = breaks.p_caller_code.get();
+					breakpoins_breaks.p_caller_code = AllocMem(nullptr, sz);
+					auto const base = breakpoins_breaks.p_caller_code.get();
 
 					// write caller code
 
-					for (auto const& hook : breaks.hooks)
+					for (auto const& hook : breakpoins_breaks.hooks)
 					{
 						Log::WriteLine(__FUNCTION__ ": [%s - %d][0x%x = %s , %d] Final Size %d.", hook.lib, acount, hook.hookaddr, hook.proc, hook.num_overridden, sz);
 
 						if (hook.proc_address)
 						{
+							//apply the assembly code here
 							ApplyPatch(p_code, code_call); // code
-							ApplyPatch(p_code + 0x03, entry); // PUSH HookAddress
-
-							auto const rel = RelativeOffset(
-								base + (p_code - code.data() + 0x0D), hook.proc_address);
+							//replace the code that needed
+							ApplyPatch(p_code + 0x03, breakpoints_entry); // PUSH HookAddress
+							auto const rel = GetRelativeOffset(base + (p_code - code.data() + 0x0D), hook.proc_address);
 							ApplyPatch(p_code + 0x09, rel); // CALL
 
-							auto const pdReturnEIP = &GetData()->ReturnEIP;
-							ApplyPatch(p_code + 0x11, pdReturnEIP); // MOV
-							ApplyPatch(p_code + 0x19, pdReturnEIP); // CMP
-							ApplyPatch(p_code + 0x22, pdReturnEIP); // JMP ds:ReturnEIP
+							//auto const pdReturnEIP = &GetData()->ReturnEIP;
+							//ApplyPatch(p_code + 0x11, pdReturnEIP); // MOV
+							//ApplyPatch(p_code + 0x19, pdReturnEIP); // CMP
+							//ApplyPatch(p_code + 0x22, pdReturnEIP); // JMP ds:ReturnEIP
 
-							p_code += sizeof(code_call);
+							p_code += 0x21;
 						}
 					}
 
 					// write overridden bytes
-					if (overridden)
+					if (hooks_.numOverriden)
 					{
-						ReadMem(entry, p_code, overridden);
-						p_code += overridden;
+						ReadMem(breakpoints_entry, p_code, hooks_.numOverriden);
+						p_code += hooks_.numOverriden;
 					}
 
+
 					// write the jump back
-					auto const rel = RelativeOffset(
-						base + (p_code - code.data() + 0x05),
-						static_cast<BYTE*>(entry) + 0x05);
+					auto const rel = GetRelativeOffset(
+						base + (p_code - code.data() + 0x5), static_cast<BYTE*>(breakpoints_entry) + std::max(hooks_.numOverriden, sizeof(jmp)));
+
 					ApplyPatch(p_code, jmp_back);
 					ApplyPatch(p_code + 0x01, rel);
 
@@ -260,7 +316,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 				    //Log::WriteLine("Call dump for 0x%08X at 0x%08X:", entry, base);
 
 					code.resize(sz);
-					ReadMem(breaks.p_caller_code, code.data(), sz);
+					ReadMem(breakpoins_breaks.p_caller_code, code.data(), sz);
 					/*
 										std::string dump_str{ "\t\t" };
 										for(auto const& byte : code) {
@@ -273,10 +329,10 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 										Log::WriteLine();*/
 
 										// patch original code
-					auto const p_original_code = static_cast<BYTE*>(entry);
+					auto const p_original_code = static_cast<BYTE*>(breakpoints_entry);
 
-					auto const rel2 = RelativeOffset(p_original_code + 5, base);
-					code.assign(std::max(overridden, sizeof(jmp)), NOP);
+					auto const rel2 = GetRelativeOffset(p_original_code + 5, base);
+					code.assign(std::max(hooks_.numOverriden, sizeof(jmp)), NOP);
 					ApplyPatch(code.data(), jmp);
 					ApplyPatch(code.data() + 0x01, rel2);
 
@@ -426,6 +482,7 @@ void SyringeDebugger::Run(std::string_view const arguments)
 {
 	constexpr auto AllocDataSize = sizeof(AllocData);
 
+	static_assert(AllocDataSize == 580u, "InvalidAllocSize");
 	Log::WriteLine(
 		__FUNCTION__ ": Running process to debug. cmd = \"%s %.*s\"",
 		exe.c_str(), printable(arguments));
@@ -439,24 +496,6 @@ void SyringeDebugger::Run(std::string_view const arguments)
 	// write DLL loader code
 	Log::WriteLine(__FUNCTION__ ": Writing DLL loader & caller code...");
 
-	static constexpr BYTE const cLoadLibrary[] =
-	{
-		0x50, // push eax
-		0x51, // push ecx
-		0x52, // push edx
-		0x68, INIT, INIT, INIT, INIT, // push offset pdLibName
-		0xFF, 0x15, INIT, INIT, INIT, INIT, // call pImLoadLibrary
-		0x85, 0xC0, // test eax, eax
-		0x74, 0x0C, // jz
-		0x68, INIT, INIT, INIT, INIT, // push offset pdProcName
-		0x50, // push eax
-		0xFF, 0x15, INIT, INIT, INIT, INIT, // call pdImGetProcAddress
-		0xA3, INIT, INIT, INIT, INIT, // mov pdProcAddress, eax
-		0x5A, // pop edx
-		0x59, // pop ecx
-		0x58, // pop eax
-		INT3, NOP // int3 and some padding
-	};
 
 	std::array<BYTE, AllocDataSize> data;
 	static_assert(AllocData::CodeSize >= sizeof(cLoadLibrary) , "Invalid Size !");
@@ -466,7 +505,12 @@ void SyringeDebugger::Run(std::string_view const arguments)
 	ApplyPatch(data.data() + 0x13, &GetData()->ProcName);
 	ApplyPatch(data.data() + 0x1A, pImGetProcAddress);
 	ApplyPatch(data.data() + 0x1F, &GetData()->ProcAddress);
-	PatchMem(pAlloc, data.data(), data.size());
+	constexpr size_t datasize = data.size();
+
+	if(!PatchMem(pAlloc, data.data(), datasize)){
+		Log::WriteLine(__FUNCTION__ ": LoadLibrary patching failed !");
+		return;
+	}
 
 	Log::WriteLine(__FUNCTION__ ": pcLoadLibrary = 0x%08X", &GetData()->LoadLibraryFunc);
 
@@ -554,10 +598,8 @@ void SyringeDebugger::RemoveBP(LPVOID const address, bool const restoreOpcode)
 	{
 		if (restoreOpcode)
 		{
-			PatchMem(address, &i->second.original_opcode, 1);
-			//MessageBoxA(
-			//	nullptr, "Syringe Attempt to Remove Break points",
-			//	"gamemd.exe", MB_OK | MB_ICONINFORMATION);
+			if(PatchMem(address, &i->second.original_opcode, 1))
+				Log::WriteLine("Syringe Attempt to Remove[%X] Break points", address);
 		}
 
 		Breakpoints.erase(i);
@@ -611,11 +653,11 @@ void SyringeDebugger::RetrieveInfo()
 	}
 
 	// read meta information: size and checksum
-	if (ifstream is{ exe, ifstream::binary })
+	if (std::ifstream is{ exe, std::ifstream::binary })
 	{
-		is.seekg(0, ifstream::end);
+		is.seekg(0, std::ifstream::end);
 		dwExeSize = static_cast<DWORD>(is.tellg());
-		is.seekg(0, ifstream::beg);
+		is.seekg(0, std::ifstream::beg);
 
 		CRC32 crc;
 		char buffer[0x1000];
@@ -657,6 +699,7 @@ void SyringeDebugger::FindDLLs()
 	Breakpoints.clear();
 	HookBuffer buffer_Inj;
 	HookBuffer buffer_Override;
+	PatchBuffer buffer_patch;
 
 	for (auto file = FindFile("*.dll"); file; ++file) {
 		std::string_view const fn(file->cFileName);
@@ -691,9 +734,16 @@ void SyringeDebugger::FindDLLs()
 				}
 
 				if (auto const hooks = DLL.FindSection(".syhks01")) {
-					if(ParseOverrideHooksSection(DLL, *hooks, buffer_Inj , buffer_Override))
-					Log::WriteLine(
+					if (ParseOverrideHooksSection(DLL, *hooks, buffer_Inj, buffer_Override))
+						Log::WriteLine(
 						__FUNCTION__ ": Found Override Hook Section : \"%.*s\"", printable(fn));
+				}
+
+				if (auto const hooks = DLL.FindSection(".syhks02"))
+				{
+					if (ParsePatchSection(DLL, *hooks, buffer_patch))
+						Log::WriteLine(
+						__FUNCTION__ ": Found Patch Section : \"%.*s\"", printable(fn));
 				}
 
 				if (auto const res = Handshake(
@@ -715,6 +765,16 @@ void SyringeDebugger::FindDLLs()
 					h.original_opcode = 0x00;
 					h.hooks.insert(
 						h.hooks.end(), it.second.begin(), it.second.end());
+				}
+
+
+				for (auto& patch : buffer_patch.hooks) {
+					//first come first serve
+					if (std::find_if(Patched.begin(), Patched.end(),
+						[&](Patch& const here) { return (unsigned int)patch.first == here.addr; }) == Patched.end())
+					{
+						Patched.push_back(*patch.second.begin());
+					}
 				}
 			}
 			else if (!buffer.hooks.empty()) {
@@ -928,17 +988,56 @@ bool SyringeDebugger::ParseOverrideHooksSection(
 			// msvc linker inserts arbitrary padding between variables that come
 			// from different translation units
 			if (h.hookNamePtr && h.overrideModuleName) {
-				auto const rawNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
-				auto const rawModuleNamePtr = DLL.VirtualToRaw(h.overrideModuleName - base);
-				if (DLL.ReadCString(rawNamePtr, hookName) && DLL.ReadCString(rawModuleNamePtr,moduleName)) {
+				auto const rawhookNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
+				auto const rawmoduleNamePtr = DLL.VirtualToRaw(h.overrideModuleName - base);
+				if (DLL.ReadCString(rawhookNamePtr, hookName) && DLL.ReadCString(rawmoduleNamePtr,moduleName)) {
 					overriderBuffer.add(reinterpret_cast<void*>(h.hookAddr), moduleName, hookName, h.hookSize);
-					
+
 					if(h.hookSize != -1)
 						supposehook.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
 				}
 			}
 		}
 		else {
+			Log::WriteLine(__FUNCTION__ ": Bytes read failed");
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool SyringeDebugger::ParsePatchSection(
+	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks,
+	PatchBuffer& buffer) {
+	constexpr auto const Size = sizeof(patchdecl);
+	auto const base = DLL.GetImageBase();
+	auto const filename = std::string_view(DLL.GetFilename());
+
+	auto const begin = hooks.PointerToRawData;
+	auto const end = begin + hooks.SizeOfRawData;
+
+	std::string hookName {};
+	hookName.reserve(0x800);
+
+	for (auto ptr = begin; ptr < end; ptr += Size)
+	{
+		patchdecl h {};
+		if (DLL.ReadBytes(ptr, Size, &h))
+		{
+			// msvc linker inserts arbitrary padding between variables that come
+			// from different translation units
+			if (h.hookNamePtr) {
+				auto const rawhookNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
+				//TODO : reading patch section better
+				//		 this cannot do that atm
+				if (DLL.ReadCString(rawhookNamePtr, hookName) ) {
+					buffer.add(reinterpret_cast<void*>(h.patchAddr), filename, hookName, h.patchDataSize, (BYTE*)h.patchData);
+				}
+			}
+		}
+		else
+		{
 			Log::WriteLine(__FUNCTION__ ": Bytes read failed");
 			return false;
 		}
