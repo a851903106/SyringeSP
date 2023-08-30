@@ -14,30 +14,7 @@
 #include <windows.h>
 
 static constexpr size_t MaxNameLength = 0x100u;
-static constexpr BYTE INIT = 0x00;
-static constexpr BYTE INT3 = 0xCC; // trap to debugger interrupt opcode.
-static constexpr BYTE NOP = 0x90;
 
-static constexpr BYTE const cLoadLibrary[] =
-{
-	0x50, // push eax
-	0x51, // push ecx
-	0x52, // push edx
-	0x68, INIT, INIT, INIT, INIT, // push offset pdLibName
-	0xFF, 0x15, INIT, INIT, INIT, INIT, // call pImLoadLibrary
-	0x85, 0xC0, // test eax, eax
-	0x74, 0x0C, // jz
-	0x68, INIT, INIT, INIT, INIT, // push offset pdProcName
-	0x50, // push eax
-	0xFF, 0x15, INIT, INIT, INIT, INIT, // call pdImGetProcAddress
-	0xA3, INIT, INIT, INIT, INIT, // mov pdProcAddress, eax
-	0x5A, // pop edx
-	0x59, // pop ecx
-	0x58, // pop eax
-	INT3, NOP // int3 and some padding
-};
-
-static constexpr size_t SizeOfLoadLib = sizeof(cLoadLibrary);
 
 class SyringeDebugger
 {
@@ -45,8 +22,20 @@ public:
 
 	using dllptr = void*;
 	using eipptr = void*;
+	using MemoryHelper = std::vector<BYTE>;
 
 	static std::vector<std::string> IgnoredDll;
+
+	//accumulate all hooks
+	// param :
+	// const begin of BreakpointInfo
+	// const end of BreakpointInfo
+	// default init value
+	// bynary operation
+	struct HooksAccumulateData {
+		size_t count;
+		size_t numOverriden;
+	};
 
 	SyringeDebugger(std::string_view filename)
 		: exe(filename)
@@ -151,22 +140,26 @@ private:
 		size_t num_overridden;
 	};
 
-	struct Patch {
-		unsigned int addr;
-		char lib[MaxNameLength]; //module name
-		char proc[MaxNameLength]; //patch real name
-		BYTE* Data;
-		size_t DataSize;
+#pragma pack(push, 1)
+	struct __declspec(novtable)
+		DllPatcher {
+		uintptr_t offset;
+		size_t size;
+		BYTE* pData;
 
-		void ApplyPatch() const {
+		void Apply() {
+			void* pAddress = (void*)this->offset;
+
 			DWORD protect_flag;
-			VirtualProtect((eipptr)addr, this->DataSize, PAGE_EXECUTE_READWRITE, &protect_flag);
-			memcpy((eipptr)addr, this->Data, this->DataSize);
-			VirtualProtect((eipptr)addr, this->DataSize, protect_flag, 0);
+			VirtualProtect(pAddress, this->size, PAGE_EXECUTE_READWRITE, &protect_flag);
+			std::memcpy(pAddress, this->pData, this->size);
+			VirtualProtect(pAddress, this->size, protect_flag, 0);
 		}
 	};
+#pragma pack(pop)
 
-	static std::vector<Patch> Patched;
+	static std::map<std::string, DllPatcher*> PatcherMap;
+
 	void ApplyPatches();
 
 	struct BreakpointInfo
@@ -176,7 +169,7 @@ private:
 		VirtualMemoryHandle p_caller_code;
 	};
 
-	std::map<void*, BreakpointInfo> Breakpoints;
+	std::map<eipptr, BreakpointInfo> Breakpoints;
 
 	std::vector<Hook*> v_AllHooks;
 	std::vector<Hook*>::iterator loop_LoadLibrary;
@@ -215,7 +208,7 @@ private:
 		CRC32 checksum;
 		size_t count{ 0 };
 
-		void add(void* const eip, Hook const& hook) {
+		void add(eipptr const eip, Hook const& hook) {
 			auto& h = hooks[eip];
 			h.push_back(hook);
 
@@ -225,7 +218,7 @@ private:
 		}
 
 		void add(
-			void* const eip, std::string_view const filename,
+			eipptr const eip, std::string_view const filename,
 			std::string_view const proc, size_t const num_overridden)
 		{
 			Hook hook;
@@ -238,52 +231,7 @@ private:
 			add(eip, hook);
 		}
 
-		void remove(std::string_view const proc, void* const eip)
-		{
-			if (!hooks.contains(eip))
-				return;
-
-			auto& nHookv = hooks.at(eip);
-			for (size_t i = 0; i < nHookv.size(); ++i) {
-				if (proc == nHookv.at(i).proc) {
-					nHookv.erase(nHookv.begin() + i);
-				}
-			}
-		}
-
-		size_t GetCurentSize() const
-		{ return hooks.size(); }
-	};
-
-	struct PatchBuffer {
-		std::map<eipptr, std::vector<Patch>> hooks;
-		CRC32 checksum;
-		size_t count{ 0 };
-
-		void add(void* const eip, Patch const& hook) {
-			auto& h = hooks[eip];
-			h.push_back(hook);
-
-			checksum.compute(&eip, sizeof(eip));
-			checksum.compute(&hook.DataSize, sizeof(hook.DataSize));
-			count++;
-		}
-
-		void add(
-			void* const eip, std::string_view const filename,
-			std::string_view const proc, size_t const DataSize , BYTE* const data)
-		{
-			Patch patch;
-			patch.lib[filename.copy(patch.lib, std::size(patch.lib) - 1)] = '\0';
-			patch.proc[proc.copy(patch.proc, std::size(patch.proc) - 1)] = '\0';
-			patch.Data = data;
-			patch.DataSize = DataSize;
-			patch.addr = (size_t)eip;
-
-			add(eip, patch);
-		}
-
-		void remove(std::string_view const proc, void* const eip)
+		void remove(std::string_view const proc, eipptr const eip)
 		{
 			if (!hooks.contains(eip))
 				return;
@@ -303,12 +251,13 @@ private:
 	bool ParseInjFileHooks(std::string_view lib, HookBuffer& hooks, const char* extension);
 	bool CanHostDLL(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hosts) const;
 	bool ParseHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer);
-	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer, HookBuffer& overriderBuffer);
-	bool ParsePatchSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, PatchBuffer& buffer);
+	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& hookneedtoremove, HookBuffer& bufferAdd);
+	bool ParsePatchSection(PortableExecutable const& DLL);
 
 	bool Handshake(std::string_view lib, int hooks, unsigned int crc);
 protected :
-	static void __declspec(noinline) RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData, HookBuffer& reapplyHooksData);
+	void WriteHooks(MemoryHelper& tempmemory, eipptr breakpoints_entry , BreakpointInfo& breakpoins_breaks , const HooksAccumulateData& hooks_, int idx);
+	static void __declspec(noinline) RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData);
 };
 
 // disable "structures padded due to alignment specifier"
@@ -317,13 +266,6 @@ protected :
 struct alignas(16) hookdecl {
 	unsigned int hookAddr;
 	unsigned int hookSize;
-	DWORD hookNamePtr;
-};
-
-struct alignas(16) patchdecl {
-	unsigned int patchAddr;
-	DWORD patchData;
-	unsigned int patchDataSize;
 	DWORD hookNamePtr;
 };
 

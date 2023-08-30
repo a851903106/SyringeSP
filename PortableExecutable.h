@@ -97,8 +97,25 @@ public:
 
 	bool ReadCString(DWORD dwRawAddress, std::string& result) const;
 
+
 	IMAGE_SECTION_HEADER const* FindSection(
 		std::string_view name) const noexcept;
+
+	struct SectionData 	{
+		void* addrs;
+		size_t size;
+	};
+
+	SectionData GetSection(const char* pName) const {
+		for (auto const& sect : this->GetSections()) {
+			if (strncmp(pName, (char*)sect.Name, 8) == 0) {
+
+				return { (void*)(Handle + sect.VirtualAddress) , sect.Misc.VirtualSize };
+			}
+		}
+
+		return {};
+	}
 
 private:
 	bool ReadFile();

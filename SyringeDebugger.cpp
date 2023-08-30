@@ -16,23 +16,168 @@
 
 //using namespace std;
 std::vector<std::string> SyringeDebugger::IgnoredDll;
-std::vector<SyringeDebugger::Patch> SyringeDebugger::Patched;
+std::map<std::string, SyringeDebugger::DllPatcher*> SyringeDebugger::PatcherMap;
 
-void SyringeDebugger::ApplyPatches() {
-	for (auto const& Patch : Patched) {
-		if (!Patch.Data)
-			continue;
+#pragma pack(push, 1)
+// 8-bit relative jump.
+typedef struct _JMP_REL_SHORT {
+	UINT8  opcode;      // EB xx: JMP +2+xx
+	UINT8  operand;
 
-		MessageBoxA(
-			nullptr, "Syringe Is halted before run",
-			reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
-
-		Log::WriteLine(
-			__FUNCTION__ ": ApplyPatch from: %s "
-			"- %s", Patch.lib, Patch.proc);
-		Patch.ApplyPatch();
+	static constexpr inline size_t size() {
+		return sizeof(_JMP_REL_SHORT);
 	}
-}
+
+} JMP_REL_SHORT, * PJMP_REL_SHORT;
+
+// 32-bit direct relative jump/call.
+typedef struct _JMP_REL {
+	UINT8  opcode;      // E9/E8 xxxxxxxx: JMP/CALL +5+xxxxxxxx
+	UINT32 operand;     // Relative destination address
+
+	static constexpr inline size_t size() {
+		return sizeof(_JMP_REL);
+	}
+
+} JMP_REL, * PJMP_REL, CALL_REL;
+
+// 32-bit direct relative conditional jumps.
+typedef struct _JCC_REL {
+	UINT8  opcode0;     // 0F8* xxxxxxxx: J** +6+xxxxxxxx
+	UINT8  opcode1;
+	UINT32 operand;     // Relative destination address
+
+	static constexpr inline size_t size() {
+		return sizeof(_JCC_REL);
+	}
+
+} JCC_REL;
+
+#pragma pack(pop)
+
+struct Assembly {
+
+	/// <summary>Meaningless byte.</summary>
+	static constexpr BYTE INIT = 0x00;
+	/// <summary>INT3</summary>
+	static constexpr BYTE INT3 = 0xCC;
+	/// <summary>NOP</summary>
+	static constexpr BYTE NOP = 0x90;
+
+	static constexpr BYTE CALL = 0xE8;
+	static constexpr BYTE JMP = 0xE9;
+
+	static constexpr BYTE const this2fastcall[] = {
+			0x8B, 0x54, 0xE4, 0x08, //MOV EDX, [ESP + 8]
+			0x58, // POP EAX
+			0x89, 0x44, 0xE4, 0x04, // MOV [ESP + 4], EAX
+			0x89, 0xC8, // MOV EAX, ECX
+			0x59, // POP ECX
+			0xFF, 0xE0 // JMP EAX
+	};
+	static constexpr auto sizeof_this2fastcall = sizeof(this2fastcall);
+
+	static constexpr BYTE const jmp_code_[] = {
+			0x58, // POP EAX
+			0x83, 0xC4, 0x04, // ADD ESP, 4
+			0xFF, 0xE0 // JMP EAX
+	};
+	static constexpr size_t sizeof_jmp_code_ = sizeof(jmp_code_);
+
+
+	static constexpr BYTE const load_library[] = {
+		0x50, // push eax
+		0x51, // push ecx
+		0x52, // push edx
+		0x68, INIT, INIT, INIT, INIT, // push offset pdLibName
+		0xFF, 0x15, INIT, INIT, INIT, INIT, // call pImLoadLibrary
+		0x85, 0xC0, // test eax, eax
+		0x74, 0x0C, // jz
+		0x68, INIT, INIT, INIT, INIT, // push offset pdProcName
+		0x50, // push eax
+		0xFF, 0x15, INIT, INIT, INIT, INIT, // call pdImGetProcAddress
+		0xA3, INIT, INIT, INIT, INIT, // mov pdProcAddress, eax
+		0x5A, // pop edx
+		0x59, // pop ecx
+		0x58, // pop eax
+		INT3, NOP // int3 and some padding
+	};
+	static constexpr size_t sizeof_load_library = sizeof(load_library);
+
+	//constexpr static BYTE const hook_code_call_old[] = {
+	//	0x60, 0x9C, // PUSHAD, PUSHFD
+	//	0x68, INIT, INIT, INIT, INIT, // PUSH HookAddress
+	//	0x54, // PUSH ESP
+	//	0xE8, INIT, INIT, INIT, INIT, // CALL ProcAddress
+	//	0x83, 0xC4, 0x08, // ADD ESP, 8
+	//	0xA3, INIT, INIT, INIT, INIT, // MOV ds:ReturnEIP, EAX
+	//	0x9D, 0x61, // POPFD, POPAD
+	//	0x83, 0x3D, INIT, INIT, INIT, INIT, 0x00, // CMP ds:ReturnEIP, 0
+	//	0x74, 0x06, // JZ .proceed
+	//	0xFF, 0x25, INIT, INIT, INIT, INIT, // JMP ds:ReturnEIP
+	//};
+	//static constexpr size_t sizeof_hook_code_call_old = sizeof(hook_code_call_old);
+
+	constexpr static BYTE const hook_code_call[] = {
+		0x60, 0x9C, // PUSHAD, PUSHFD
+		0x68, INIT, INIT, INIT, INIT, // PUSH HookAddress
+		0x54, // PUSH ESP
+		INIT, INIT, INIT, INIT, INIT, // insert E8 (CALL) ProcAddress
+		0x83, 0xC4, 0x08, // ADD ESP, 8
+		0x89, 0x44, 0x24, 0xFC, // MOV ds:ReturnEIP, EAX
+		0x9D, 0x61, // POPFD, POPAD
+		0x83, 0x7C, 0x24, 0xD8, 0x00, // CMP ds:ReturnEIP, 0
+		0x74, 0x04, // JZ .proceed
+		0xFF, 0x64, 0x24 , 0xD8 , INIT , INIT , INIT// JMP ds:ReturnEIP
+	};
+	static constexpr size_t sizeof_hook_code_call = sizeof(hook_code_call);
+	static_assert(sizeof_hook_code_call == 36u, "Invalid Size!");
+
+
+	//constexpr static BYTE const hoke_code_call_DP[] = {
+	//	0x60, 0x9C, //PUSHAD, PUSHFD
+	//	0x68, INIT, INIT, INIT, INIT, //PUSH HookAddress
+	//	0x83, 0xEC, 0x04,//SUB ESP, 4
+	//	0x8D, 0x44, 0x24, 0x04,//LEA EAX,[ESP + 4]
+	//	0x50, //PUSH EAX
+	//	0xE8, INIT, INIT, INIT, INIT,  //CALL ProcAddress
+	//	0x83, 0xC4, 0x0C, //ADD ESP, 0Ch
+	//	0x89, 0x44, 0x24, 0xF8,//MOV ss:[ESP - 8], EAX
+	//	0x9D, 0x61, //POPFD, POPAD
+	//	0x83, 0x7C, 0x24, 0xD4, 0x00,//CMP ss:[ESP - 2Ch], 0
+	//	0x74, 0x04, //JZ .proceed
+	//	0xFF, 0x64, 0x24, 0xD4 //JMP ss:[ESP - 2Ch]
+	//};
+	//static constexpr size_t sizeof_hoke_code_call_DP = sizeof(hoke_code_call_DP);
+
+
+	//constexpr static BYTE const jmp[] = { 0xE9, INIT, INIT, INIT, INIT };
+	//static constexpr size_t sizeof_jmp = sizeof(jmp);
+
+	//constexpr static BYTE const call[] = { 0xE8, INIT, INIT, INIT, INIT };
+	//static constexpr size_t sizeof_call = sizeof(call);
+
+	struct JumpStruct {
+		uintptr_t From;
+		uintptr_t To;
+
+		uintptr_t getOffset() {
+			return To - From - JMP_REL::size();
+		}
+	};
+
+	//template<typename T>
+	//static bool ReadFromAddr(uintptr_t address, T& obj) {
+	//	BYTE mem[sizeof(T)];
+	//	bool ret = SyringeDebugger::ReadMem((void*)address, mem, sizeof(T));
+	//	std::memcpy(obj, mem, sizeof(T));
+	//	return ret;
+	//}
+
+};
+
+void SyringeDebugger::ApplyPatches() {}
+
 //TODO : Other Type of hook supports !
 
 /*
@@ -63,9 +208,9 @@ bool SyringeDebugger::PatchMem(void* address, void const* buffer, DWORD size)
 	return (WriteProcessMemory(pInfo.hProcess, address, buffer, size, nullptr) != FALSE);
 }
 
-bool SyringeDebugger::ReadMem(void const* address, void* buffer, DWORD size)
+bool SyringeDebugger::ReadMem(void const* address, void* destinationbuffer, DWORD size)
 {
-	return (ReadProcessMemory(pInfo.hProcess, address, buffer, size, nullptr) != FALSE);
+	return (ReadProcessMemory(pInfo.hProcess, address, destinationbuffer, size, nullptr) != FALSE);
 }
 
 VirtualMemoryHandle SyringeDebugger::AllocMem(void* address, size_t size)
@@ -81,7 +226,7 @@ bool SyringeDebugger::SetBP(void* address)
 {
 	// save overwritten code and set INT 3
 	if (auto& opcode = Breakpoints[address].original_opcode; opcode == 0x00) {
-		auto const buffer = INT3;
+		auto const buffer = Assembly::INT3;
 		ReadMem(address, &opcode, 1);
 		return PatchMem(address, &buffer, 1);
 	}
@@ -95,6 +240,11 @@ DWORD __fastcall SyringeDebugger::GetRelativeOffset(void const* pFrom, void cons
 	auto const to = reinterpret_cast<DWORD>(pTo);
 
 	return to - from;
+}
+
+void __declspec(noinline) SyringeDebugger::WriteHooks(MemoryHelper& tempmemory, eipptr breakpoints_entry, BreakpointInfo& breakpoins_breaks, const HooksAccumulateData& hooks_, int idx) {
+
+
 }
 
 DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
@@ -121,7 +271,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 		// fix single step repetition issues
 		if (context.EFlags & 0x100)
 		{
-			auto const buffer = INT3;
+			auto const buffer = Assembly::INT3;
 			context.EFlags &= ~0x100;
 			PatchMem(threadInfo.lastBP, &buffer, 1);
 		}
@@ -144,6 +294,12 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 				if (!hook->proc_address) {
 					Log::WriteLine(
 						__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
+						"- %s", hook->lib, hook->proc);
+				}
+				else
+				{
+					Log::WriteLine(
+						__FUNCTION__ ": Succeeded retrieve ProcAddress for: %s "
 						"- %s", hook->lib, hook->proc);
 				}
 
@@ -176,49 +332,16 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 			return DBG_CONTINUE;
 		}
 
+
 		if (exceptAddr == pcEntryPoint)
 		{
 			if (!bHooksCreated)
 			{
 				Log::WriteLine(__FUNCTION__ ": Creating code hooks.");
 
-				//SyringeDebugger::ApplyPatches();
-
-				//constexpr static BYTE const code_call[] =
-				//{
-				//	0x60, 0x9C, // PUSHAD, PUSHFD
-				//	0x68, INIT, INIT, INIT, INIT, // PUSH HookAddress
-				//	0x54, // PUSH ESP
-				//	0xE8, INIT, INIT, INIT, INIT, // CALL ProcAddress
-				//	0x83, 0xC4, 0x08, // ADD ESP, 8
-				//	0xA3, INIT, INIT, INIT, INIT, // MOV ds:ReturnEIP, EAX
-				//	0x9D, 0x61, // POPFD, POPAD
-				//	0x83, 0x3D, INIT, INIT, INIT, INIT, 0x00, // CMP ds:ReturnEIP, 0
-				//	0x74, 0x06, // JZ .proceed
-				//	0xFF, 0x25, INIT, INIT, INIT, INIT, // JMP ds:ReturnEIP
-				//};
-
-				constexpr static BYTE const code_call[] =
-				{
-					0x60, 0x9C, // PUSHAD, PUSHFD
-					0x68, INIT, INIT, INIT, INIT, // PUSH HookAddress
-					0x54, // PUSH ESP
-					0xE8, INIT, INIT, INIT, INIT, // CALL ProcAddress
-					0x83, 0xC4, 0x08, // ADD ESP, 8
-					0x89, 0x44, 0x24, 0xFC, // MOV ds:ReturnEIP, EAX
-					0x9D, 0x61, // POPFD, POPAD
-					0x83, 0x7C, 0x24, 0xD8, 0x00, // CMP ds:ReturnEIP, 0
-					0x74, 0x04, // JZ .proceed
-					0xFF, 0x64, 0x24 , 0xD8 , INIT , INIT , INIT// JMP ds:ReturnEIP
-				};
-
-				static_assert(sizeof(code_call) == 36u, "Invalid Size!");
-
-				constexpr static BYTE const jmp_back[] = { 0xE9, INIT, INIT, INIT, INIT };
-				constexpr static BYTE const jmp[] = { 0xE9, INIT, INIT, INIT, INIT };
-
 				//temporary vector for code Byte
-				std::vector<BYTE> code{};
+				MemoryHelper tempmemory{};
+				HooksAccumulateData hooks_ {};
 				int acount = 0;
 
 				for (auto& [breakpoints_entry, breakpoins_breaks] : Breakpoints)
@@ -228,20 +351,10 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 						continue;
 					}
 
-					//accumulate all hooks
-					// param :
-					// const begin of BreakpointInfo
-					// const end of BreakpointInfo
-					// default init value
-					// bynary operation
-					struct HooksAccumulateData 	{
-						size_t count;
-						size_t numOverriden;
-					};
 
 					// count = how much hook is present
 					// overridden = number of overriden of the hook
-					HooksAccumulateData hooks_ = std::accumulate(breakpoins_breaks.hooks.cbegin(), breakpoins_breaks.hooks.cend(),
+					hooks_ = std::accumulate(breakpoins_breaks.hooks.cbegin(), breakpoins_breaks.hooks.cend(),
 						HooksAccumulateData(0u, 0u), [](HooksAccumulateData acc, Hook const& hook)
 						{
 							if (hook.proc_address)
@@ -255,91 +368,113 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 							return acc;
 						});
 
-					if (!hooks_.count)
-					{
+					if (!hooks_.count) {
 						continue;
 					}
 
+					//Formulate the hook function
 					//calculate final sizes
-					auto const sz = (hooks_.count * sizeof(code_call))
-						+ sizeof(jmp_back) + hooks_.numOverriden;
+					const auto totalHookSize = hooks_.count * Assembly::sizeof_hook_code_call;
+					const auto sz = totalHookSize + JMP_REL::size() + hooks_.numOverriden;
 
-					code.resize(sz);
-					auto p_code = code.data();
+					tempmemory.resize(sz);
 
+					BYTE* memoryptr = tempmemory.data();
+
+					// hook address to be called
 					breakpoins_breaks.p_caller_code = AllocMem(nullptr, sz);
-					auto const base = breakpoins_breaks.p_caller_code.get();
-
-					// write caller code
 
 					for (auto const& hook : breakpoins_breaks.hooks)
 					{
-						Log::WriteLine(__FUNCTION__ ": [%s - %d][0x%x = %s , %d] Final Size %d.", hook.lib, acount, hook.hookaddr, hook.proc, hook.num_overridden, sz);
-
 						if (hook.proc_address)
 						{
-							//apply the assembly code here
-							ApplyPatch(p_code, code_call); // code
+							// write hook caller code
+							ApplyPatch(memoryptr, Assembly::hook_code_call); // code
 							//replace the code that needed
-							ApplyPatch(p_code + 0x03, breakpoints_entry); // PUSH HookAddress
-							auto const rel = GetRelativeOffset(base + (p_code - code.data() + 0x0D), hook.proc_address);
-							ApplyPatch(p_code + 0x09, rel); // CALL
+							ApplyPatch(memoryptr + 0x03, breakpoints_entry); // PUSH HookAddress
+							const auto hook_call_rel = GetRelativeOffset(
+								breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + 0x0D)
+								, hook.proc_address
+							);
 
-							//auto const pdReturnEIP = &GetData()->ReturnEIP;
-							//ApplyPatch(p_code + 0x11, pdReturnEIP); // MOV
-							//ApplyPatch(p_code + 0x19, pdReturnEIP); // CMP
-							//ApplyPatch(p_code + 0x22, pdReturnEIP); // JMP ds:ReturnEIP
+							//MessageBoxA(
+							//	nullptr, "Syringe Is halted before run",
+							//	reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
 
-							p_code += 0x21;
+							CALL_REL call = { Assembly::CALL , hook_call_rel };
+							ApplyPatch(memoryptr + 0x08, call);
+							memoryptr += 0x21; //advance the iterator
+
 						}
 					}
 
 					// write overridden bytes
-					if (hooks_.numOverriden)
+					if (hooks_.numOverriden > 0)
 					{
-						ReadMem(breakpoints_entry, p_code, hooks_.numOverriden);
-						p_code += hooks_.numOverriden;
+						//read the overriden bytes
+						ReadMem(breakpoints_entry, memoryptr, hooks_.numOverriden);
+						bool needToRestore = false;
+
+						//found jump or call opcode
+						if (*memoryptr == Assembly::CALL || *memoryptr == Assembly::JMP)
+						{
+							Log::WriteLine(
+								__FUNCTION__ ":Hook [%x] Possibly destroying jmp or call", (uintptr_t)breakpoints_entry);
+							needToRestore = true;
+						}
+
+						memoryptr += hooks_.numOverriden; //advance the iterator
+
+						//if (needToRestore)
+						//{
+						//	MessageBoxA(
+						//		nullptr, "Syringe Is halted before run",
+						//		reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
+						//
+						//	int dest = 0;
+						//	BYTE mem[sizeof(int)];
+						//	SyringeDebugger::ReadMem((void*)((uintptr_t)breakpoints_entry + 1), mem, sizeof(int));
+						//	std::memcpy(&dest, mem, sizeof(int));
+						//	dest = (uintptr_t)breakpoints_entry + 5 + dest;
+						//	const auto jmp_back_rel = GetRelativeOffset(
+						//		breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + 0x5), (void*)dest);
+						//	ApplyPatch(memoryptr, jmp_back_rel);
+						//	memoryptr += sizeof(DWORD);
+						//}
 					}
 
+					// write the jump back for return
+					const auto jmp_back_rel = GetRelativeOffset(
+						breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + 0x5),
+						static_cast<BYTE*>(breakpoints_entry) + std::max(hooks_.numOverriden, JMP_REL::size()));
 
-					// write the jump back
-					auto const rel = GetRelativeOffset(
-						base + (p_code - code.data() + 0x5), static_cast<BYTE*>(breakpoints_entry) + std::max(hooks_.numOverriden, sizeof(jmp)));
+					JMP_REL jmp_back = { Assembly::JMP ,  jmp_back_rel };
+					ApplyPatch(memoryptr, jmp_back);
+					//ApplyPatch(memoryptr + 0x01, jmp_back_rel);
 
-					ApplyPatch(p_code, jmp_back);
-					ApplyPatch(p_code + 0x01, rel);
+					//write finished hook data to reserved memory
+					PatchMem(breakpoins_breaks.p_caller_code.get(), tempmemory.data(), tempmemory.size());
 
-					PatchMem(base, code.data(), code.size());
+					// replace the original instruction with hook call
 
-					// dump
+					tempmemory.resize(sz);
 
-				    //Log::WriteLine("Call dump for 0x%08X at 0x%08X:", entry, base);
-
-					code.resize(sz);
-					ReadMem(breakpoins_breaks.p_caller_code, code.data(), sz);
-					/*
-										std::string dump_str{ "\t\t" };
-										for(auto const& byte : code) {
-											char buffer[0x10];
-											sprintf(buffer, "%02X ", byte);
-											dump_str += buffer;
-										}
-
-										Log::WriteLine(dump_str.c_str());
-										Log::WriteLine();*/
-
-										// patch original code
-					auto const p_original_code = static_cast<BYTE*>(breakpoints_entry);
-
-					auto const rel2 = GetRelativeOffset(p_original_code + 5, base);
-					code.assign(std::max(hooks_.numOverriden, sizeof(jmp)), NOP);
-					ApplyPatch(code.data(), jmp);
-					ApplyPatch(code.data() + 0x01, rel2);
-
-					PatchMem(p_original_code, code.data(), code.size());
+					// move the hook data to temp memory
+					ReadMem(breakpoins_breaks.p_caller_code.get(), tempmemory.data(), sz);
+					const auto p_original_code = static_cast<BYTE*>(breakpoints_entry);
+					const auto originalcode_rel = GetRelativeOffset(p_original_code + 5, breakpoins_breaks.p_caller_code.get());
+					//resize the temp memory then fill it with NOP
+					tempmemory.assign(std::max(hooks_.numOverriden, JMP_REL::size()), Assembly::NOP);
+					//apply the jump opcode
+					JMP_REL hookjmpOpcode = { Assembly::JMP ,  originalcode_rel };
+					ApplyPatch(tempmemory.data(), hookjmpOpcode);
+					//insert the jump back address
+					//ApplyPatch(tempmemory.data() + 0x01, originalcode_rel);
+					//patch the memory to the destination
+					PatchMem(p_original_code, tempmemory.data(), tempmemory.size());
 				}
 
-				Log::WriteLine(__FUNCTION__" :CodeSize After [%d]", code.size());
+				Log::WriteLine(__FUNCTION__" :CodeSize After [%d]", tempmemory.size());
 				Log::Flush();
 
 				bHooksCreated = true;
@@ -372,7 +507,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 	}
 	else if (exceptCode == EXCEPTION_SINGLE_STEP)
 	{
-		auto const buffer = INT3;
+		auto const buffer = Assembly::INT3;
 		auto const& threadInfo = Threads[dbgEvent.dwThreadId];
 		PatchMem(threadInfo.lastBP, &buffer, 1);
 
@@ -440,35 +575,6 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 			}
 			Log::WriteLine();
 
-			//Log::WriteLine("Making crash dump:\n");
-			//MINIDUMP_EXCEPTION_INFORMATION expParam;
-			//expParam.ThreadId = dbgEvent.dwThreadId;
-			//EXCEPTION_POINTERS ep;
-			//ep.ExceptionRecord = const_cast<PEXCEPTION_RECORD>(&dbgEvent.u.Exception.ExceptionRecord);
-			//ep.ContextRecord = &context;
-			//expParam.ExceptionPointers = &ep;
-			//expParam.ClientPointers = FALSE;
-
-			//wchar_t filename[MAX_PATH];
-			//wchar_t path[MAX_PATH];
-			//SYSTEMTIME time;
-
-			//GetLocalTime(&time);
-			//GetCurrentDirectoryW(MAX_PATH, path);
-
-			//swprintf(filename, MAX_PATH, L"%s\\syringe.crashed.%04u%02u%02u-%02u%02u%02u.dmp",
-			//	path, time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond);
-
-			//HANDLE dumpFile = CreateFileW(filename, GENERIC_READ | GENERIC_WRITE,
-			//	FILE_SHARE_WRITE | FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_FLAG_WRITE_THROUGH, nullptr);
-
-			//MINIDUMP_TYPE type = (MINIDUMP_TYPE)MiniDumpWithFullMemory;
-
-			//MiniDumpWriteDump(pInfo.hProcess, dbgEvent.dwProcessId, dumpFile, type, &expParam, nullptr, nullptr);
-			//CloseHandle(dumpFile);
-
-			//Log::WriteLine("Crash dump generated.\n");
-
 			bAVLogged = true;
 		}
 
@@ -498,8 +604,8 @@ void SyringeDebugger::Run(std::string_view const arguments)
 
 
 	std::array<BYTE, AllocDataSize> data;
-	static_assert(AllocData::CodeSize >= sizeof(cLoadLibrary) , "Invalid Size !");
-	ApplyPatch(data.data(), cLoadLibrary);
+	static_assert(AllocData::CodeSize >= Assembly::sizeof_load_library, "Invalid Size !");
+	ApplyPatch(data.data(), Assembly::load_library);
 	ApplyPatch(data.data() + 0x04, &GetData()->LibName);
 	ApplyPatch(data.data() + 0x0A, pImLoadLibrary);
 	ApplyPatch(data.data() + 0x13, &GetData()->ProcName);
@@ -697,9 +803,7 @@ std::string convert_int(int n)
 void SyringeDebugger::FindDLLs()
 {
 	Breakpoints.clear();
-	HookBuffer buffer_Inj;
-	HookBuffer buffer_Override;
-	PatchBuffer buffer_patch;
+	HookBuffer buffer_remove;
 
 	for (auto file = FindFile("*.dll"); file; ++file) {
 		std::string_view const fn(file->cFileName);
@@ -727,23 +831,10 @@ void SyringeDebugger::FindDLLs()
 				Log::WriteLine(
 					__FUNCTION__ ": Recognized DLL: \"%.*s\"", printable(fn));
 
-				const auto  excludeInj = ".exinj";
-				if (!ParseInjFileHooks(fn, buffer_Inj , excludeInj)) {
-					Log::WriteLine(
-						__FUNCTION__ ": Failed Parsing DLL.exinj: \"%.*s\"", printable(fn));
-				}
-
 				if (auto const hooks = DLL.FindSection(".syhks01")) {
-					if (ParseOverrideHooksSection(DLL, *hooks, buffer_Inj, buffer_Override))
+					if (ParseOverrideHooksSection(DLL, *hooks, buffer_remove, buffer))
 						Log::WriteLine(
 						__FUNCTION__ ": Found Override Hook Section : \"%.*s\"", printable(fn));
-				}
-
-				if (auto const hooks = DLL.FindSection(".syhks02"))
-				{
-					if (ParsePatchSection(DLL, *hooks, buffer_patch))
-						Log::WriteLine(
-						__FUNCTION__ ": Found Patch Section : \"%.*s\"", printable(fn));
 				}
 
 				if (auto const res = Handshake(
@@ -758,23 +849,11 @@ void SyringeDebugger::FindDLLs()
 			}
 
 			if (canLoad) {
-				for (auto const& it : buffer.hooks) {
-					auto const eip = it.first;
+				for (auto const&[eip , hooks] : buffer.hooks) {
 					auto& h = Breakpoints[eip];
 					h.p_caller_code.clear();
 					h.original_opcode = 0x00;
-					h.hooks.insert(
-						h.hooks.end(), it.second.begin(), it.second.end());
-				}
-
-
-				for (auto& patch : buffer_patch.hooks) {
-					//first come first serve
-					if (std::find_if(Patched.begin(), Patched.end(),
-						[&](Patch& const here) { return (unsigned int)patch.first == here.addr; }) == Patched.end())
-					{
-						Patched.push_back(*patch.second.begin());
-					}
+					h.hooks.insert(h.hooks.end(), hooks.begin(), hooks.end());
 				}
 			}
 			else if (!buffer.hooks.empty()) {
@@ -784,14 +863,14 @@ void SyringeDebugger::FindDLLs()
 			}
 		}
 		catch (...) {
-			//Log::WriteLine(
-			//	__FUNCTION__ ": DLL Parse failed: \"%.*s\"", printable(fn));
+			Log::WriteLine(
+				__FUNCTION__ ": DLL Parse failed: \"%.*s\"", printable(fn));
 		}
 	}
 
 	// summarize all hooks
 	v_AllHooks.clear();
-	SyringeDebugger::RemoveBreakPoints(Breakpoints, buffer_Inj, buffer_Override);
+	SyringeDebugger::RemoveBreakPoints(Breakpoints, buffer_remove);
 	for (auto& it : Breakpoints) {
 		for (auto& data : it.second.hooks) {
 
@@ -810,55 +889,39 @@ void SyringeDebugger::FindDLLs()
 		}
 
 		if (it.second.hooks.size() > 1)
-			Log::WriteLine(__FUNCTION__ ":[Addr - 0x%x] Is Hooked by %d function !.", it.first, it.second.hooks.size());
+			Log::WriteLine(__FUNCTION__ ":[0x%x , %s , %d] Is Hooked by %d function !.", it.second.hooks[0].hookaddr , it.second.hooks[0].proc , it.second.hooks[0].num_overridden , it.second.hooks.size());
 	}
 
 	Log::WriteLine(__FUNCTION__ ": Done (%d hooks added).", v_AllHooks.size());
 	Log::WriteLine();
 }
 
-void SyringeDebugger::RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData, HookBuffer& reapplyHooksData)
+void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData)
 {
-	for (auto& it : breakpoints)
+	if (excludeHooksData.count <= 0)
+		return;
+
+	for (auto&[eip , breakpointInfo] : breakpoints)
 	{
-		for (size_t i = 0; i < it.second.hooks.size(); ++i)
+		if (eip == nullptr)
+			continue;
+
+		for (size_t i = 0; i < breakpointInfo.hooks.size(); ++i)
 		{
-			auto& nBreakHook = it.second.hooks.at(i);
+			auto& nBreakHook = breakpointInfo.hooks.at(i);
 
-			for (auto& nIgnoreData : excludeHooksData.hooks) {
-				for (auto& nVec : nIgnoreData.second) {
-
-					//Log::WriteLine(__FUNCTION__ ":[Sizeof TempData 0x%x - %d ].", nVec.hookaddr , nTempData.size());
+			for (auto&[eip_exc , vector] : excludeHooksData.hooks) {
+				for (auto& nVec : vector) {
 
 					if ((_strcmpi(nBreakHook.lib, nVec.lib) == 0) && //same dll
-						nBreakHook.hookaddr == nVec.hookaddr)// same address
-						//&& (_strcmpi(i->proc , nVec.proc) == 0)
-						//&& i->num_overridden == i->num_overridden
+						nBreakHook.hookaddr == nVec.hookaddr// same address
+						//&& (_strcmpi(nBreakHook.proc , nVec.proc) == 0)
+						//&& nBreakHook.num_overridden == i->num_overridden
+						)
 					{
-						bool Found = false;
-						if (reapplyHooksData.hooks.contains(nIgnoreData.first))
-						{
-							auto& nReplace = reapplyHooksData.hooks[nIgnoreData.first];
-							auto const IterHere = std::find_if(nReplace.begin(), nReplace.end(), [&](auto const& Data) {return nBreakHook.hookaddr == Data.hookaddr; });
-
-							if (IterHere != nReplace.end()) {
-								Found = true;
-								nBreakHook = (*IterHere);
-								Log::WriteLine(__FUNCTION__ ":[ Replacing %s -> %s][0x%x = %s , %d] hook.", nVec.lib , (*IterHere).lib, (*IterHere).hookaddr, (*IterHere).proc, (*IterHere).num_overridden);
-							}
-						}
-
-						if (!Found)
-						{
-							Log::WriteLine(__FUNCTION__ ":[ Removing %s][0x%x = %s , %d] hook.", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
-							it.second.hooks.erase(it.second.hooks.begin() + i);
-						}
+						Log::WriteLine(__FUNCTION__ ":[ Removing %s][0x%x = %s , %d] hook.", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
+						breakpointInfo.hooks.erase(breakpointInfo.hooks.begin() + i);
 					}
-					//else if (nBreakHook.hookaddr == 0x0)
-					//{
-					//	Log::WriteLine(__FUNCTION__ ":[ Removing %s][0x%x = %s , %d] hook.", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
-					//	it.second.hooks.erase(it.second.hooks.begin() + i);
-					//}
 				}
 			}
 		}
@@ -941,7 +1004,7 @@ bool SyringeDebugger::ParseHooksSection(
 	auto const end = begin + hooks.SizeOfRawData;
 
 	std::string hookName{};
-	hookName.reserve(0x800);
+	hookName.reserve(0x100);
 
 	for (auto ptr = begin; ptr < end; ptr += Size) {
 		hookdecl h{};
@@ -967,7 +1030,7 @@ bool SyringeDebugger::ParseHooksSection(
 
 bool SyringeDebugger::ParseOverrideHooksSection(
 	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks,
-	HookBuffer& overriderBuffer , HookBuffer& supposehook)
+	HookBuffer& hookneedtoremove , HookBuffer& bufferAdd)
 {
 	constexpr auto const Size = sizeof(hookdecl);
 	auto const base = DLL.GetImageBase();
@@ -977,10 +1040,10 @@ bool SyringeDebugger::ParseOverrideHooksSection(
 	auto const end = begin + hooks.SizeOfRawData;
 
 	std::string hookName{};
-	hookName.reserve(0x800);
+	hookName.reserve(0x100);
 
 	std::string moduleName{};
-	moduleName.reserve(0x800);
+	moduleName.reserve(0x100);
 
 	for (auto ptr = begin; ptr < end; ptr += Size) {
 		overridehookdecl h{};
@@ -991,10 +1054,10 @@ bool SyringeDebugger::ParseOverrideHooksSection(
 				auto const rawhookNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
 				auto const rawmoduleNamePtr = DLL.VirtualToRaw(h.overrideModuleName - base);
 				if (DLL.ReadCString(rawhookNamePtr, hookName) && DLL.ReadCString(rawmoduleNamePtr,moduleName)) {
-					overriderBuffer.add(reinterpret_cast<void*>(h.hookAddr), moduleName, hookName, h.hookSize);
+					hookneedtoremove.add(reinterpret_cast<void*>(h.hookAddr), moduleName, hookName, h.hookSize);
 
 					if(h.hookSize != -1)
-						supposehook.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
+						bufferAdd.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
 				}
 			}
 		}
@@ -1007,40 +1070,31 @@ bool SyringeDebugger::ParseOverrideHooksSection(
 	return true;
 }
 
+int GetSection(PortableExecutable const& DLL, const char* sectionName, void** pVirtualAddress) {
+	const auto& [addr, size] = DLL.GetSection(sectionName);
+	*pVirtualAddress = addr;
+	return size;
+}
+
 bool SyringeDebugger::ParsePatchSection(
-	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks,
-	PatchBuffer& buffer) {
-	constexpr auto const Size = sizeof(patchdecl);
-	auto const base = DLL.GetImageBase();
-	auto const filename = std::string_view(DLL.GetFilename());
+	PortableExecutable const& DLL) {
+	auto const filename = DLL.GetFilename();
 
-	auto const begin = hooks.PointerToRawData;
-	auto const end = begin + hooks.SizeOfRawData;
+	void* ptrbuffer;
+	const int len = GetSection(DLL ,".patch", &ptrbuffer);
+	if (!len)
+		return false;
 
-	std::string hookName {};
-	hookName.reserve(0x800);
-
-	for (auto ptr = begin; ptr < end; ptr += Size)
+	for (int offset = 0; offset < len; offset += sizeof(DllPatcher))
 	{
-		patchdecl h {};
-		if (DLL.ReadBytes(ptr, Size, &h))
-		{
-			// msvc linker inserts arbitrary padding between variables that come
-			// from different translation units
-			if (h.hookNamePtr) {
-				auto const rawhookNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
-				//TODO : reading patch section better
-				//		 this cannot do that atm
-				if (DLL.ReadCString(rawhookNamePtr, hookName) ) {
-					buffer.add(reinterpret_cast<void*>(h.patchAddr), filename, hookName, h.patchDataSize, (BYTE*)h.patchData);
-				}
-			}
-		}
-		else
-		{
-			Log::WriteLine(__FUNCTION__ ": Bytes read failed");
-			return false;
-		}
+		const auto pPatch = (DllPatcher*)((DWORD)ptrbuffer + offset);
+		if (pPatch->offset == 0)
+			continue;
+
+		Log::WriteLine(
+			__FUNCTION__ ": Found .patch Section :[%s - %d] [%x]", filename , offset, pPatch->offset);
+
+		SyringeDebugger::PatcherMap[filename] = pPatch;
 	}
 
 	return true;
