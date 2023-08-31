@@ -242,10 +242,10 @@ DWORD __fastcall SyringeDebugger::GetRelativeOffset(void const* pFrom, void cons
 	return to - from;
 }
 
-void __declspec(noinline) SyringeDebugger::WriteHooks(MemoryHelper& tempmemory, eipptr breakpoints_entry, BreakpointInfo& breakpoins_breaks, const HooksAccumulateData& hooks_, int idx) {
-
-
-}
+//void __declspec(noinline) SyringeDebugger::WriteHooks(MemoryHelper& tempmemory, eipptr breakpoints_entry, BreakpointInfo& breakpoins_breaks, const HooksAccumulateData& hooks_, int idx) {
+//
+//
+//}
 
 DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 {
@@ -296,12 +296,12 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 						__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
 						"- %s", hook->lib, hook->proc);
 				}
-				else
-				{
-					Log::WriteLine(
-						__FUNCTION__ ": Succeeded retrieve ProcAddress for: %s "
-						"- %s", hook->lib, hook->proc);
-				}
+				//else
+				//{
+				//	Log::WriteLine(
+				//		__FUNCTION__ ": Succeeded retrieve ProcAddress for: %s "
+				//		"- %s", hook->lib, hook->proc);
+				//}
 
 				++loop_LoadLibrary;
 			}
@@ -803,7 +803,7 @@ std::string convert_int(int n)
 void SyringeDebugger::FindDLLs()
 {
 	Breakpoints.clear();
-	HookBuffer buffer_remove;
+	HookOverrideBuffer buffer_remove;
 
 	for (auto file = FindFile("*.dll"); file; ++file) {
 		std::string_view const fn(file->cFileName);
@@ -896,35 +896,35 @@ void SyringeDebugger::FindDLLs()
 	Log::WriteLine();
 }
 
-void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData)
+void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakpoints, HookOverrideBuffer& excludeHooksData)
 {
-	if (excludeHooksData.count <= 0)
+	if (excludeHooksData.GetCurentSize() <= 0)
 		return;
 
-	for (auto&[eip , breakpointInfo] : breakpoints)
+	for (auto& breaks : breakpoints)
 	{
-		if (eip == nullptr)
+		if (breaks.first == nullptr)
 			continue;
 
-		for (size_t i = 0; i < breakpointInfo.hooks.size(); ++i)
-		{
-			auto& nBreakHook = breakpointInfo.hooks.at(i);
+		breaks.second.hooks.erase(std::remove_if(std::begin(breaks.second.hooks), std::end(breaks.second.hooks), [&](const SyringeDebugger::Hook& nBreakHook) {
 
-			for (auto&[eip_exc , vector] : excludeHooksData.hooks) {
-				for (auto& nVec : vector) {
+			for (const auto& nVec : excludeHooksData.hooks)
+			{
+				if ((_strcmpi(nBreakHook.lib, nVec.lib) == 0) && //same dll
+					nBreakHook.hookaddr == nVec.hookaddr// same address
+					//&& (_strcmpi(nBreakHook.proc , nVec.proc) == 0)
+					//&& nBreakHook.num_overridden == i->num_overridden
+					)
+				{
+					//Log::WriteLine(__FUNCTION__ ":[Removing %s][0x%x = %s , %d] hook.",nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
 
-					if ((_strcmpi(nBreakHook.lib, nVec.lib) == 0) && //same dll
-						nBreakHook.hookaddr == nVec.hookaddr// same address
-						//&& (_strcmpi(nBreakHook.proc , nVec.proc) == 0)
-						//&& nBreakHook.num_overridden == i->num_overridden
-						)
-					{
-						Log::WriteLine(__FUNCTION__ ":[ Removing %s][0x%x = %s , %d] hook.", nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
-						breakpointInfo.hooks.erase(breakpointInfo.hooks.begin() + i);
-					}
+					return true;
 				}
 			}
-		}
+
+			return false;
+
+		}), std::end(breaks.second.hooks));
 	}
 }
 
@@ -1030,7 +1030,7 @@ bool SyringeDebugger::ParseHooksSection(
 
 bool SyringeDebugger::ParseOverrideHooksSection(
 	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks,
-	HookBuffer& hookneedtoremove , HookBuffer& bufferAdd)
+	HookOverrideBuffer& hookneedtoremove , HookBuffer& bufferAdd)
 {
 	constexpr auto const Size = sizeof(hookdecl);
 	auto const base = DLL.GetImageBase();
@@ -1054,7 +1054,7 @@ bool SyringeDebugger::ParseOverrideHooksSection(
 				auto const rawhookNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
 				auto const rawmoduleNamePtr = DLL.VirtualToRaw(h.overrideModuleName - base);
 				if (DLL.ReadCString(rawhookNamePtr, hookName) && DLL.ReadCString(rawmoduleNamePtr,moduleName)) {
-					hookneedtoremove.add(reinterpret_cast<void*>(h.hookAddr), moduleName, hookName, h.hookSize);
+					hookneedtoremove.add(h.hookAddr, moduleName, hookName, h.hookSize);
 
 					if(h.hookSize != -1)
 						bufferAdd.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);

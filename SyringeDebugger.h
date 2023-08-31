@@ -16,8 +16,7 @@
 static constexpr size_t MaxNameLength = 0x100u;
 
 
-class SyringeDebugger
-{
+class SyringeDebugger {
 public:
 
 	using dllptr = void*;
@@ -38,8 +37,7 @@ public:
 	};
 
 	SyringeDebugger(std::string_view filename)
-		: exe(filename)
-	{
+		: exe(filename) {
 		RetrieveInfo();
 	}
 
@@ -60,8 +58,7 @@ public:
 	void FindDLLs();
 
 	template<typename T = int>
-	bool startsWithDigit(const std::string& s)
-	{
+	bool startsWithDigit(const std::string& s) {
 		if (s.empty())
 			return false;
 
@@ -74,20 +71,20 @@ public:
 	}
 
 	template<typename T = int>
-	std::optional<T> stonum(const std::string& st)
-	{
+	std::optional<T> stonum(const std::string& st) {
 		const auto s = trim(st);
 		bool ok = startsWithDigit<T>(s);
 
-		auto v = T{};
+		auto v = T {};
 
-		if (ok) {
+		if (ok)
+		{
 			std::istringstream ss(s);
 			ss >> v;
 			ok = (ss.peek() == EOF);
 		}
 
-		return ok ? v : std::optional<T>{};
+		return ok ? v : std::optional<T> {};
 	}
 
 
@@ -99,26 +96,23 @@ private:
 	static DWORD __fastcall GetRelativeOffset(void const* from, void const* to);
 
 	template<typename T>
-	static void ApplyPatch(void* ptr, T&& data) noexcept
-	{
+	static void ApplyPatch(void* ptr, T&& data) noexcept {
 		std::memcpy(ptr, &data, sizeof(data));
 	}
 
 	template<typename T>
-	static void ApplyPatch(void* ptr, T&& data , size_t size) noexcept {
+	static void ApplyPatch(void* ptr, T&& data, size_t size) noexcept {
 		std::memcpy(ptr, &data, size);
 	}
 	// thread info
-	struct ThreadInfo
-	{
+	struct ThreadInfo {
 		ThreadInfo() = default;
 
 		ThreadInfo(HANDLE hThread) noexcept
-			: Thread{hThread}
-		{ }
+			: Thread { hThread } { }
 
 		ThreadHandle Thread;
-		LPVOID lastBP{ nullptr };
+		LPVOID lastBP { nullptr };
 	};
 
 	std::map<DWORD, ThreadInfo> Threads;
@@ -127,11 +121,10 @@ private:
 	PROCESS_INFORMATION pInfo;
 
 	// flags
-	bool bEntryBP{ true };
+	bool bEntryBP { true };
 
 	// breakpoints
-	struct Hook
-	{
+	struct Hook {
 		unsigned int hookaddr;
 		char lib[MaxNameLength]; //module name
 		char proc[MaxNameLength]; //hook real name
@@ -162,9 +155,8 @@ private:
 
 	void ApplyPatches();
 
-	struct BreakpointInfo
-	{
-		BYTE original_opcode{ 0x0u };
+	struct BreakpointInfo {
+		BYTE original_opcode { 0x0u };
 		std::vector<Hook> hooks;
 		VirtualMemoryHandle p_caller_code;
 	};
@@ -176,18 +168,18 @@ private:
 
 	// syringe
 	std::string exe;
-	void* pcEntryPoint{ nullptr };
-	void* pImLoadLibrary{ nullptr };
-	void* pImGetProcAddress{ nullptr };
+	void* pcEntryPoint { nullptr };
+	void* pImLoadLibrary { nullptr };
+	void* pImGetProcAddress { nullptr };
 	VirtualMemoryHandle pAlloc;
-	DWORD dwTimeStamp{ 0u };
-	DWORD dwExeSize{ 0u };
-	DWORD dwExeCRC{ 0u };
+	DWORD dwTimeStamp { 0u };
+	DWORD dwExeSize { 0u };
+	DWORD dwExeCRC { 0u };
 
-	bool bDLLsLoaded{ false };
-	bool bHooksCreated{ false };
+	bool bDLLsLoaded { false };
+	bool bHooksCreated { false };
 
-	bool bAVLogged{ false };
+	bool bAVLogged { false };
 
 	// data addresses
 	struct AllocData {
@@ -206,7 +198,7 @@ private:
 	struct HookBuffer {
 		std::map<eipptr, std::vector<Hook>> hooks;
 		CRC32 checksum;
-		size_t count{ 0 };
+		size_t count { 0 };
 
 		void add(eipptr const eip, Hook const& hook) {
 			auto& h = hooks[eip];
@@ -219,8 +211,7 @@ private:
 
 		void add(
 			eipptr const eip, std::string_view const filename,
-			std::string_view const proc, size_t const num_overridden)
-		{
+			std::string_view const proc, size_t const num_overridden) {
 			Hook hook;
 			hook.lib[filename.copy(hook.lib, std::size(hook.lib) - 1)] = '\0';
 			hook.proc[proc.copy(hook.proc, std::size(hook.proc) - 1)] = '\0';
@@ -231,33 +222,61 @@ private:
 			add(eip, hook);
 		}
 
-		void remove(std::string_view const proc, eipptr const eip)
-		{
+		void remove(std::string_view const proc, eipptr const eip) {
 			if (!hooks.contains(eip))
 				return;
 
 			auto& nHookv = hooks.at(eip);
-			for (size_t i = 0; i < nHookv.size(); ++i) {
-				if (proc == nHookv.at(i).proc) {
+			for (size_t i = 0; i < nHookv.size(); ++i)
+			{
+				if (proc == nHookv.at(i).proc)
+				{
 					nHookv.erase(nHookv.begin() + i);
 				}
 			}
 		}
 
-		size_t GetCurentSize() const
-		{ return hooks.size(); }
+		size_t GetCurentSize() const {
+			return hooks.size();
+		}
+	};
+
+	struct HookOverrideBuffer {
+		std::vector<Hook> hooks;
+
+		void add(Hook const& hook) {
+			hooks.push_back(hook);
+
+		}
+
+		void add(
+			uintptr_t const eip, std::string_view const filename,
+			std::string_view const proc, size_t const num_overridden) {
+			Hook hook;
+			hook.lib[filename.copy(hook.lib, std::size(hook.lib) - 1)] = '\0';
+			hook.proc[proc.copy(hook.proc, std::size(hook.proc) - 1)] = '\0';
+			hook.proc_address = nullptr;
+			hook.num_overridden = num_overridden;
+			hook.hookaddr = eip;
+
+			add(hook);
+		}
+
+		size_t GetCurentSize() const {
+			return hooks.size();
+		}
 	};
 
 	bool ParseInjFileHooks(std::string_view lib, HookBuffer& hooks, const char* extension);
 	bool CanHostDLL(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hosts) const;
 	bool ParseHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer);
-	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& hookneedtoremove, HookBuffer& bufferAdd);
+	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookOverrideBuffer& hookneedtoremove, HookBuffer& bufferAdd);
 	bool ParsePatchSection(PortableExecutable const& DLL);
 
 	bool Handshake(std::string_view lib, int hooks, unsigned int crc);
-protected :
-	void WriteHooks(MemoryHelper& tempmemory, eipptr breakpoints_entry , BreakpointInfo& breakpoins_breaks , const HooksAccumulateData& hooks_, int idx);
-	static void __declspec(noinline) RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookBuffer& excludeHooksData);
+protected:
+	//void WriteHooks(MemoryHelper& tempmemory, eipptr breakpoints_entry, BreakpointInfo& breakpoins_breaks, const HooksAccumulateData& hooks_, int idx);
+	static void __declspec(noinline) RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookOverrideBuffer& excludeHooksData);
 };
 
 // disable "structures padded due to alignment specifier"
@@ -285,8 +304,7 @@ static_assert(sizeof(hookdecl) == 16);
 static_assert(sizeof(hostdecl) == 16);
 #pragma warning(pop)
 
-struct SyringeHandshakeInfo
-{
+struct SyringeHandshakeInfo {
 	int cbSize;
 	int num_hooks;
 	unsigned int checksum;
@@ -297,4 +315,4 @@ struct SyringeHandshakeInfo
 	char* Message;
 };
 
-using SYRINGEHANDSHAKEFUNC = HRESULT(__cdecl *)(SyringeHandshakeInfo*);
+using SYRINGEHANDSHAKEFUNC = HRESULT(__cdecl*)(SyringeHandshakeInfo*);
