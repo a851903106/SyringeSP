@@ -57,15 +57,12 @@ typedef struct _JCC_REL {
 
 struct Assembly {
 
-	/// <summary>Meaningless byte.</summary>
-	static constexpr BYTE INIT = 0x00;
-	/// <summary>INT3</summary>
-	static constexpr BYTE INT3 = 0xCC;
-	/// <summary>NOP</summary>
-	static constexpr BYTE NOP = 0x90;
-
-	static constexpr BYTE CALL = 0xE8;
-	static constexpr BYTE JMP = 0xE9;
+	static constexpr BYTE INIT = 0x00 ,
+	INT3 = 0xCC ,
+	NOP = 0x90 ,
+	CALL = 0xE8 ,
+	JMP = 0xE9 ,
+	JLE = 0x7E;
 
 	static constexpr BYTE const this2fastcall[] = {
 			0x8B, 0x54, 0xE4, 0x08, //MOV EDX, [ESP + 8]
@@ -252,7 +249,9 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 	auto const exceptCode = dbgEvent.u.Exception.ExceptionRecord.ExceptionCode;
 	auto const exceptAddr = dbgEvent.u.Exception.ExceptionRecord.ExceptionAddress;
 
-	if (exceptCode == EXCEPTION_BREAKPOINT)
+	switch (exceptCode)
+	{
+	case EXCEPTION_BREAKPOINT:
 	{
 		auto& threadInfo = Threads[dbgEvent.dwThreadId];
 		HANDLE currentThread = threadInfo.Thread;
@@ -291,17 +290,16 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 				auto const& hook = *loop_LoadLibrary;
 				ReadMem(&GetData()->ProcAddress, &hook->proc_address, 4);
 
-				if (!hook->proc_address) {
+				if (!hook->proc_address)
+				{
 					Log::WriteLine(
 						__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
 						"- %s", hook->lib, hook->proc);
 				}
-				//else
-				//{
-				//	Log::WriteLine(
-				//		__FUNCTION__ ": Succeeded retrieve ProcAddress for: %s "
-				//		"- %s", hook->lib, hook->proc);
-				//}
+				else
+				{
+					Log::WriteLine(__FUNCTION__ ": %s [0x%x , %s , %d]" , hook->lib , hook->hookaddr , hook->proc , hook->num_overridden);
+				}
 
 				++loop_LoadLibrary;
 			}
@@ -340,35 +338,38 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 				Log::WriteLine(__FUNCTION__ ": Creating code hooks.");
 
 				//temporary vector for code Byte
-				MemoryHelper tempmemory{};
-				HooksAccumulateData hooks_ {};
-				int acount = 0;
+				MemoryHelper tempmemory {};
+				MemoryHelper overridenMem {};
 
 				for (auto& [breakpoints_entry, breakpoins_breaks] : Breakpoints)
 				{
-					++acount;
-					if (breakpoints_entry == nullptr || breakpoints_entry == pcEntryPoint) {
+					tempmemory.clear();
+					overridenMem.clear();
+
+					if (breakpoints_entry == nullptr || breakpoints_entry == pcEntryPoint)
+					{
 						continue;
 					}
 
-
 					// count = how much hook is present
 					// overridden = number of overriden of the hook
-					hooks_ = std::accumulate(breakpoins_breaks.hooks.cbegin(), breakpoins_breaks.hooks.cend(),
-						HooksAccumulateData(0u, 0u), [](HooksAccumulateData acc, Hook const& hook)
+					HooksAccumulateData hooks_ { 0u , 0u };
+
+					for (const auto& hook : breakpoins_breaks.hooks)
+					{
+						if (hook.proc_address)
 						{
-							if (hook.proc_address)
+							if (hooks_.numOverriden < hook.num_overridden)
 							{
-								if (acc.numOverriden < hook.num_overridden) {
-									acc.numOverriden = hook.num_overridden;
-								}
-								acc.count++;
+								hooks_.numOverriden = hook.num_overridden;
 							}
 
-							return acc;
-						});
+							hooks_.count++;
+						}
+					}
 
-					if (!hooks_.count) {
+					if (hooks_.count <= 0)
+					{
 						continue;
 					}
 
@@ -383,11 +384,33 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 					// hook address to be called
 					breakpoins_breaks.p_caller_code = AllocMem(nullptr, sz);
+					bool checked = false;
+					bool needProtect = false;
 
-					for (auto const& hook : breakpoins_breaks.hooks)
+					for (size_t i = 0; i < hooks_.count; ++i)
 					{
+						const auto hook = breakpoins_breaks.hooks[i];
+
 						if (hook.proc_address)
 						{
+							if (!checked && hook.num_overridden > 0)
+							{
+								//read the overriden bytes
+								overridenMem.resize(hook.num_overridden);
+								ReadMem(breakpoints_entry, overridenMem.data(), hooks_.numOverriden);
+
+								//found jump or call opcode
+								if (overridenMem[0] == Assembly::CALL || overridenMem[0] == Assembly::JMP || overridenMem[0] == Assembly::JLE)
+								{
+									Log::WriteLine(
+										__FUNCTION__ ":Hook at [0x%x = %s , %d] Possibly destroying jmp or call", breakpoints_entry, hook.proc, hook.num_overridden);
+
+									needProtect = true;
+								}
+
+								checked = true;
+							}
+
 							// write hook caller code
 							ApplyPatch(memoryptr, Assembly::hook_code_call); // code
 							//replace the code that needed
@@ -409,21 +432,15 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					}
 
 					// write overridden bytes
-					if (hooks_.numOverriden > 0)
+					if (!overridenMem.empty())
 					{
-						//read the overriden bytes
-						ReadMem(breakpoints_entry, memoryptr, hooks_.numOverriden);
-						bool needToRestore = false;
-
-						//found jump or call opcode
-						if (*memoryptr == Assembly::CALL || *memoryptr == Assembly::JMP)
+						for (size_t i = 0; i < overridenMem.size(); ++i, memoryptr += 1)
 						{
-							Log::WriteLine(
-								__FUNCTION__ ":Hook [%x] Possibly destroying jmp or call", (uintptr_t)breakpoints_entry);
-							needToRestore = true;
+							ApplyPatch(memoryptr, overridenMem[i]);
 						}
 
-						memoryptr += hooks_.numOverriden; //advance the iterator
+						//ApplyPatch(memoryptr, overridenMem.data() , overridenMem.size() - 1);
+						//memoryptr += overridenMem.size(); //advance the iterator
 
 						//if (needToRestore)
 						//{
@@ -474,7 +491,6 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					PatchMem(p_original_code, tempmemory.data(), tempmemory.size());
 				}
 
-				Log::WriteLine(__FUNCTION__" :CodeSize After [%d]", tempmemory.size());
 				Log::Flush();
 
 				bHooksCreated = true;
@@ -505,7 +521,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 			return DBG_EXCEPTION_NOT_HANDLED;
 		}
 	}
-	else if (exceptCode == EXCEPTION_SINGLE_STEP)
+	case EXCEPTION_SINGLE_STEP:
 	{
 		auto const buffer = Assembly::INT3;
 		auto const& threadInfo = Threads[dbgEvent.dwThreadId];
@@ -524,11 +540,10 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 		return DBG_CONTINUE;
 	}
-	else
-	{
+	default:
 		//	Log::WriteLine(
-		//		__FUNCTION__ ": Exception (Code: 0x%08X at 0x%08X)!", exceptCode,
-		//		exceptAddr);
+//		__FUNCTION__ ": Exception (Code: 0x%08X at 0x%08X)!", exceptCode,
+//		exceptAddr);
 
 		if (!bAVLogged)
 		{
@@ -564,12 +579,15 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 			Log::WriteLine("\tStack dump:");
 			auto const esp = reinterpret_cast<DWORD*>(context.Esp);
-			for (auto p = esp; p < &esp[0x100]; ++p) {
+			for (auto p = esp; p < &esp[0x100]; ++p)
+			{
 				DWORD dw;
-				if (ReadMem(p, &dw, 4)) {
+				if (ReadMem(p, &dw, 4))
+				{
 					Log::WriteLine("\t0x%08X:\t0x%08X", p, dw);
 				}
-				else {
+				else
+				{
 					Log::WriteLine("\t0x%08X:\t(could not be read)", p);
 				}
 			}
@@ -903,28 +921,27 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 
 	for (auto& breaks : breakpoints)
 	{
-		if (breaks.first == nullptr)
+		if (breaks.first == nullptr || breaks.second.hooks.empty())
 			continue;
 
-		breaks.second.hooks.erase(std::remove_if(std::begin(breaks.second.hooks), std::end(breaks.second.hooks), [&](const SyringeDebugger::Hook& nBreakHook) {
-
-			for (const auto& nVec : excludeHooksData.hooks)
-			{
-				if ((_strcmpi(nBreakHook.lib, nVec.lib) == 0) && //same dll
-					nBreakHook.hookaddr == nVec.hookaddr// same address
+		const auto Iter = std::find_if(std::begin(breaks.second.hooks), std::end(breaks.second.hooks), [&excludeHooksData](const SyringeDebugger::Hook& data) {
+			for (const auto& nVec : excludeHooksData.hooks) {
+				if ((_strcmpi(data.lib, nVec.lib) == 0) && //same dll
+					data.hookaddr == nVec.hookaddr// same address
 					//&& (_strcmpi(nBreakHook.proc , nVec.proc) == 0)
 					//&& nBreakHook.num_overridden == i->num_overridden
 					)
 				{
-					//Log::WriteLine(__FUNCTION__ ":[Removing %s][0x%x = %s , %d] hook.",nBreakHook.lib, nBreakHook.hookaddr, nBreakHook.proc, nBreakHook.num_overridden);
-
+					Log::WriteLine(__FUNCTION__ ": Removing %s [0x%x , %s , %d] hook.", data.lib, data.hookaddr, data.proc, data.num_overridden);
 					return true;
 				}
 			}
 
 			return false;
+		});
 
-		}), std::end(breaks.second.hooks));
+		if (Iter != std::end(breaks.second.hooks))
+			breaks.second.hooks.erase(Iter);
 	}
 }
 
@@ -1092,7 +1109,7 @@ bool SyringeDebugger::ParsePatchSection(
 			continue;
 
 		Log::WriteLine(
-			__FUNCTION__ ": Found .patch Section :[%s - %d] [%x]", filename , offset, pPatch->offset);
+			__FUNCTION__ ": Found .patch Section :[%s - %d] [0x%x]", filename , offset, pPatch->offset);
 
 		SyringeDebugger::PatcherMap[filename] = pPatch;
 	}
