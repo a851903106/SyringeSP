@@ -908,6 +908,7 @@ void SyringeDebugger::FindDLLs()
 
 		if (it.second.hooks.size() > 1)
 			Log::WriteLine(__FUNCTION__ ":[0x%x , %s , %d] Is Hooked by %d function !.", it.second.hooks[0].hookaddr , it.second.hooks[0].proc , it.second.hooks[0].num_overridden , it.second.hooks.size());
+
 	}
 
 	Log::WriteLine(__FUNCTION__ ": Done (%d hooks added).", v_AllHooks.size());
@@ -924,7 +925,11 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 		if (breaks.first == nullptr || breaks.second.hooks.empty())
 			continue;
 
-		const auto Iter = std::find_if(std::begin(breaks.second.hooks), std::end(breaks.second.hooks), [&excludeHooksData](const SyringeDebugger::Hook& data) {
+		auto Iter = std::remove_if(std::begin(breaks.second.hooks), std::end(breaks.second.hooks), [&excludeHooksData](const SyringeDebugger::Hook& data) {
+			if (data.num_overridden > 10u)
+				Log::WriteLine(__FUNCTION__ ": Hook %s [0x%x , %s , %d] have big size!.", data.lib, data.hookaddr, data.proc, data.num_overridden);
+
+			
 			for (const auto& nVec : excludeHooksData.hooks) {
 				if ((_strcmpi(data.lib, nVec.lib) == 0) && //same dll
 					data.hookaddr == nVec.hookaddr// same address
@@ -932,6 +937,7 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 					//&& nBreakHook.num_overridden == i->num_overridden
 					)
 				{
+
 					Log::WriteLine(__FUNCTION__ ": Removing %s [0x%x , %s , %d] hook.", data.lib, data.hookaddr, data.proc, data.num_overridden);
 					return true;
 				}
@@ -940,8 +946,7 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 			return false;
 		});
 
-		if (Iter != std::end(breaks.second.hooks))
-			breaks.second.hooks.erase(Iter);
+		breaks.second.hooks.erase(Iter , std::end(breaks.second.hooks));
 	}
 }
 
