@@ -9,7 +9,7 @@
 #include "ini-rw/include/IniFile.hpp"
 
 int Run(std::string_view const arguments) {
-	constexpr auto const VersionString = "Syringe 0.7.2.9 - Custom";
+	constexpr auto const VersionString = "Syringe 0.7.3.0 - Custom";
 
 	InitCommonControls();
 
