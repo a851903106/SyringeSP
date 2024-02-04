@@ -104,6 +104,12 @@ private:
 	static void ApplyPatch(void* ptr, T&& data, size_t size) noexcept {
 		std::memcpy(ptr, &data, size);
 	}
+
+	template<typename T>
+	static void ApplyPatch_NoMove(void* ptr, T data, size_t size) noexcept {
+		static_assert(std::is_pointer<T>::value, "Pointer Required !");
+		std::memcpy(ptr, data, size);
+	}
 	// thread info
 	struct ThreadInfo {
 		ThreadInfo() = default;
@@ -273,7 +279,7 @@ private:
 	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookOverrideBuffer& hookneedtoremove, HookBuffer& bufferAdd);
 	bool ParsePatchSection(PortableExecutable const& DLL);
 
-	bool Handshake(std::string_view lib, int hooks, unsigned int crc);
+	bool Handshake(std::string_view lib, int hooks, unsigned int crc) const;
 protected:
 	//void WriteHooks(MemoryHelper& tempmemory, eipptr breakpoints_entry, BreakpointInfo& breakpoins_breaks, const HooksAccumulateData& hooks_, int idx);
 	static void __declspec(noinline) RemoveBreakPoints(std::map<void*, BreakpointInfo>& breakpoints, HookOverrideBuffer& excludeHooksData);

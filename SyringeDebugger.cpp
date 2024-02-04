@@ -107,11 +107,11 @@ struct Assembly {
 	//	0x54, // PUSH ESP
 	//	0xE8, INIT, INIT, INIT, INIT, // CALL ProcAddress
 	//	0x83, 0xC4, 0x08, // ADD ESP, 8
-	//	0xA3, INIT, INIT, INIT, INIT, // MOV ds:ReturnEIP, EAX
+	//	0xA3, INIT, INIT, INIT, INIT, // MOV ds:JmpBack, EAX
 	//	0x9D, 0x61, // POPFD, POPAD
-	//	0x83, 0x3D, INIT, INIT, INIT, INIT, 0x00, // CMP ds:ReturnEIP, 0
+	//	0x83, 0x3D, INIT, INIT, INIT, INIT, 0x00, // CMP ds:JmpBack, 0
 	//	0x74, 0x06, // JZ .proceed
-	//	0xFF, 0x25, INIT, INIT, INIT, INIT, // JMP ds:ReturnEIP
+	//	0xFF, 0x25, INIT, INIT, INIT, INIT, // JMP ds:JmpBack
 	//};
 	//static constexpr size_t sizeof_hook_code_call_old = sizeof(hook_code_call_old);
 
@@ -119,13 +119,13 @@ struct Assembly {
 		0x60, 0x9C, // PUSHAD, PUSHFD
 		0x68, INIT, INIT, INIT, INIT, // PUSH HookAddress
 		0x54, // PUSH ESP
-		INIT, INIT, INIT, INIT, INIT, // insert E8 (CALL) ProcAddress
+		CALL, INIT, INIT, INIT, INIT, // insert E8 (CALL) ProcAddress
 		0x83, 0xC4, 0x08, // ADD ESP, 8
-		0x89, 0x44, 0x24, 0xFC, // MOV ds:ReturnEIP, EAX
+		0x89, 0x44, 0x24, 0xFC,// MOV ds:JmpBack, EAX
 		0x9D, 0x61, // POPFD, POPAD
-		0x83, 0x7C, 0x24, 0xD8, 0x00, // CMP ds:ReturnEIP, 0
-		0x74, 0x04, // JZ .proceed
-		0xFF, 0x64, 0x24 , 0xD8 , INIT , INIT , INIT// JMP ds:ReturnEIP
+		0x83, 0x7C, 0x24, 0xD8, INIT, 0x74,// CMP ds:JmpBack, 0
+		0x04, 0xFF, // JZ .proceed
+		0x64, 0x24, 0xD8 , INIT , INIT , INIT// JMP ds:JmpBack
 	};
 	static constexpr size_t sizeof_hook_code_call = sizeof(hook_code_call);
 	static_assert(sizeof_hook_code_call == 36u, "Invalid Size!");
@@ -158,7 +158,7 @@ struct Assembly {
 		uintptr_t From;
 		uintptr_t To;
 
-		uintptr_t getOffset() {
+		uintptr_t getOffset() const {
 			return To - From - JMP_REL::size();
 		}
 	};
@@ -355,12 +355,9 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					// overridden = number of overriden of the hook
 					HooksAccumulateData hooks_ { 0u , 0u };
 
-					for (const auto& hook : breakpoins_breaks.hooks)
-					{
-						if (hook.proc_address)
-						{
-							if (hooks_.numOverriden < hook.num_overridden)
-							{
+					for (const auto& hook : breakpoins_breaks.hooks) {
+						if (hook.proc_address && ((uintptr_t)hook.proc_address) != 0x0) {
+							if (hooks_.numOverriden < hook.num_overridden) {
 								hooks_.numOverriden = hook.num_overridden;
 							}
 
@@ -387,9 +384,13 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					bool checked = false;
 					bool needProtect = false;
 
+					//MessageBoxA(
+					//	nullptr, "Syringe Is halted before run",
+					//	reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
+
 					for (size_t i = 0; i < hooks_.count; ++i)
 					{
-						const auto hook = breakpoins_breaks.hooks[i];
+						const auto& hook = breakpoins_breaks.hooks[i];
 
 						if (hook.proc_address)
 						{
@@ -412,7 +413,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 							}
 
 							// write hook caller code
-							ApplyPatch(memoryptr, Assembly::hook_code_call); // code
+							ApplyPatch(memoryptr, Assembly::hook_code_call, 33u); // code
 							//replace the code that needed
 							ApplyPatch(memoryptr + 0x03, breakpoints_entry); // PUSH HookAddress
 							const auto hook_call_rel = GetRelativeOffset(
@@ -424,48 +425,29 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 							//	nullptr, "Syringe Is halted before run",
 							//	reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
 
-							CALL_REL call = { Assembly::CALL , hook_call_rel };
-							ApplyPatch(memoryptr + 0x08, call);
+							CALL_REL relative_call { Assembly::CALL , hook_call_rel };
+							//on the original syringe source this was 0x09 
+							// replaced to 0x08 since the operand from CALL_REL will be copied too
+							ApplyPatch(memoryptr + 0x08, relative_call);
 							memoryptr += 0x21; //advance the iterator
 
 						}
 					}
 
-					// write overridden bytes
-					if (!overridenMem.empty())
-					{
-						for (size_t i = 0; i < overridenMem.size(); ++i, memoryptr += 1)
-						{
-							ApplyPatch(memoryptr, overridenMem[i]);
-						}
-
-						//ApplyPatch(memoryptr, overridenMem.data() , overridenMem.size() - 1);
-						//memoryptr += overridenMem.size(); //advance the iterator
-
-						//if (needToRestore)
-						//{
-						//	MessageBoxA(
-						//		nullptr, "Syringe Is halted before run",
-						//		reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
-						//
-						//	int dest = 0;
-						//	BYTE mem[sizeof(int)];
-						//	SyringeDebugger::ReadMem((void*)((uintptr_t)breakpoints_entry + 1), mem, sizeof(int));
-						//	std::memcpy(&dest, mem, sizeof(int));
-						//	dest = (uintptr_t)breakpoints_entry + 5 + dest;
-						//	const auto jmp_back_rel = GetRelativeOffset(
-						//		breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + 0x5), (void*)dest);
-						//	ApplyPatch(memoryptr, jmp_back_rel);
-						//	memoryptr += sizeof(DWORD);
-						//}
+					// write overridden bytes to the end
+					// this for return 0 case ,..
+					if (!overridenMem.empty()) {
+						ApplyPatch_NoMove(memoryptr, overridenMem.data(), overridenMem.size());
+						memoryptr += overridenMem.size();
 					}
+
 
 					// write the jump back for return
 					const auto jmp_back_rel = GetRelativeOffset(
 						breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + 0x5),
 						static_cast<BYTE*>(breakpoints_entry) + std::max(hooks_.numOverriden, JMP_REL::size()));
 
-					JMP_REL jmp_back = { Assembly::JMP ,  jmp_back_rel };
+					JMP_REL jmp_back { Assembly::JMP ,  jmp_back_rel };
 					ApplyPatch(memoryptr, jmp_back);
 					//ApplyPatch(memoryptr + 0x01, jmp_back_rel);
 
@@ -479,11 +461,11 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					// move the hook data to temp memory
 					ReadMem(breakpoins_breaks.p_caller_code.get(), tempmemory.data(), sz);
 					const auto p_original_code = static_cast<BYTE*>(breakpoints_entry);
-					const auto originalcode_rel = GetRelativeOffset(p_original_code + 5, breakpoins_breaks.p_caller_code.get());
+					const auto originalcode_rel = GetRelativeOffset(p_original_code + JMP_REL::size(), breakpoins_breaks.p_caller_code.get());
 					//resize the temp memory then fill it with NOP
 					tempmemory.assign(std::max(hooks_.numOverriden, JMP_REL::size()), Assembly::NOP);
 					//apply the jump opcode
-					JMP_REL hookjmpOpcode = { Assembly::JMP ,  originalcode_rel };
+					JMP_REL hookjmpOpcode { Assembly::JMP ,  originalcode_rel };
 					ApplyPatch(tempmemory.data(), hookjmpOpcode);
 					//insert the jump back address
 					//ApplyPatch(tempmemory.data() + 0x01, originalcode_rel);
@@ -902,6 +884,8 @@ void SyringeDebugger::FindDLLs()
 				Log::WriteLine(__FUNCTION__ ": Found Hook with 0 num overriden , it maybe better to explicitly put the correct num overriden [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
 			else if (data.num_overridden < 5)
 				Log::WriteLine(__FUNCTION__ ": Found Hook with less than 5 bytes num overriden , it maybe better to move the hook location if possible [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
+			else if (data.num_overridden > 10)
+				Log::WriteLine(__FUNCTION__ ": Found Hook with num overriden more than 10 [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
 
 			v_AllHooks.push_back(&data);
 		}
@@ -926,9 +910,6 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 			continue;
 
 		auto Iter = std::remove_if(std::begin(breaks.second.hooks), std::end(breaks.second.hooks), [&excludeHooksData](const SyringeDebugger::Hook& data) {
-			if (data.num_overridden > 10u)
-				Log::WriteLine(__FUNCTION__ ": Hook %s [0x%x , %s , %d] have big size!.", data.lib, data.hookaddr, data.proc, data.num_overridden);
-
 			
 			for (const auto& nVec : excludeHooksData.hooks) {
 				if ((_strcmpi(data.lib, nVec.lib) == 0) && //same dll
@@ -1127,7 +1108,7 @@ bool SyringeDebugger::ParsePatchSection(
 // the hooks aren't included. if the function is not exported, we have to
 // rely on other methods.
 bool SyringeDebugger::Handshake(
-	std::string_view lib, int const hooks, unsigned int const crc)
+	std::string_view lib, int const hooks, unsigned int const crc) const
 {
 	bool ret = false;
 
