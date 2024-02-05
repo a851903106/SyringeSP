@@ -309,18 +309,20 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 			else
 			{
 				auto const& hook = *loop_LoadLibrary;
-				ReadMem(&GetData()->ProcAddress, &hook->proc_address, 4);
+				if(hook->hookaddr != 0) {
+					
+					ReadMem(&GetData()->ProcAddress, &hook->proc_address, 4);
 
-				if (!hook->proc_address)
-				{
-					Log::WriteLine(
-						__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
-						"- %s", hook->lib, hook->proc);
+					if (!hook->proc_address) {
+						Log::WriteLine(
+							__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
+							"- %s", hook->lib, hook->proc);
+					}
+					//else
+					//{
+					//	Log::WriteLine(__FUNCTION__ ": %s [0x%x , %s , %d]" , hook->lib , hook->hookaddr , hook->proc , hook->num_overridden);
+					//} 
 				}
-				//else
-				//{
-				//	Log::WriteLine(__FUNCTION__ ": %s [0x%x , %s , %d]" , hook->lib , hook->hookaddr , hook->proc , hook->num_overridden);
-				//}
 
 				++loop_LoadLibrary;
 			}
@@ -538,7 +540,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 	}
 	case EXCEPTION_SINGLE_STEP:
 	{
-		auto const buffer = Assembly::INT3;
+		BYTE buffer = Assembly::INT3;
 		auto const& threadInfo = Threads[dbgEvent.dwThreadId];
 		PatchMem(threadInfo.lastBP, &buffer, 1);
 
@@ -557,13 +559,9 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 	}
 	default:
 	{
-		//	Log::WriteLine(
-//		__FUNCTION__ ": Exception (Code: 0x%08X at 0x%08X)!", exceptCode,
-//		exceptAddr);
-
 		if (!bAVLogged)
 		{
-			Log::WriteLine(__FUNCTION__ ": ACCESS VIOLATION at 0x%08X!", exceptAddr);
+			Log::WriteLine(__FUNCTION__ ": Exception Code: 0x%08X at 0x%08X!", exceptCode, exceptAddr);
 			auto const& threadInfo = Threads[dbgEvent.dwThreadId];
 			HANDLE currentThread = threadInfo.Thread;
 
