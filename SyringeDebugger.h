@@ -156,7 +156,7 @@ private:
 			DWORD protect_flag;
 			VirtualProtect(pAddress, this->size, PAGE_EXECUTE_READWRITE, &protect_flag);
 			std::memcpy(pAddress, this->pData, this->size);
-			VirtualProtect(pAddress, this->size, protect_flag, 0);
+			VirtualProtect(pAddress, this->size, protect_flag, &protect_flag);
 		}
 	};
 #pragma pack(pop)
