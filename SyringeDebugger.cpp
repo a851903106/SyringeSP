@@ -437,14 +437,14 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					// write overridden bytes to the end
 					// this for return 0 case ,..
 					if (!overridenMem.empty()) {
-						ApplyPatch_NoMove(memoryptr, overridenMem.data(), overridenMem.size());
+						PatchMem(static_cast<BYTE*>(breakpoints_entry), memoryptr, tempmemory.size());
 						memoryptr += overridenMem.size();
 					}
 
 
 					// write the jump back for return
 					const auto jmp_back_rel = GetRelativeOffset(
-						breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + 0x5),
+						breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + JMP_REL::size()),
 						static_cast<BYTE*>(breakpoints_entry) + std::max(hooks_.numOverriden, JMP_REL::size()));
 
 					JMP_REL jmp_back { Assembly::JMP ,  jmp_back_rel };
@@ -456,14 +456,11 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 					// replace the original instruction with hook call
 
-					tempmemory.resize(sz);
+					tempmemory.resize(std::max(hooks_.numOverriden, JMP_REL::size()) , Assembly::NOP);
 
-					// move the hook data to temp memory
-					ReadMem(breakpoins_breaks.p_caller_code.get(), tempmemory.data(), sz);
 					const auto p_original_code = static_cast<BYTE*>(breakpoints_entry);
 					const auto originalcode_rel = GetRelativeOffset(p_original_code + JMP_REL::size(), breakpoins_breaks.p_caller_code.get());
 					//resize the temp memory then fill it with NOP
-					tempmemory.assign(std::max(hooks_.numOverriden, JMP_REL::size()), Assembly::NOP);
 					//apply the jump opcode
 					JMP_REL hookjmpOpcode { Assembly::JMP ,  originalcode_rel };
 					ApplyPatch(tempmemory.data(), hookjmpOpcode);
