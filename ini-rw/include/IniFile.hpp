@@ -105,4 +105,27 @@ namespace inirw
 	};
 
 	std::ostream& operator<<(std::ostream& outputStream, const IniFile& iniFile);
+
+	inline bool TryParse(const char* pValue, bool* outValue) {
+
+		switch (toupper(static_cast<unsigned char>(*pValue)))
+		{
+		case '1':
+		case 'T':
+		case 'Y':
+		{
+			*outValue = true;
+			return true;
+		}
+		case '0':
+		case 'F':
+		case 'N':
+		{
+			*outValue = false;
+			return true;
+		}
+		}
+
+		return false;
+	};
 }

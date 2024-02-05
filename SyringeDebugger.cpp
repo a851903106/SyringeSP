@@ -17,6 +17,8 @@
 //using namespace std;
 std::vector<std::string> SyringeDebugger::IgnoredDll;
 std::map<std::string, SyringeDebugger::DllPatcher*> SyringeDebugger::PatcherMap;
+bool SyringeDebugger::LoggerOptions::LogLoadLibFunc = false;
+bool SyringeDebugger::LoggerOptions::LogHookRemove = false;
 
 #pragma pack(push, 1)
 // 8-bit relative jump.
@@ -202,12 +204,31 @@ void SyringeDebugger::DebugProcess(std::string_view const arguments)
 
 bool SyringeDebugger::PatchMem(void* address, void const* buffer, DWORD size)
 {
-	return (WriteProcessMemory(pInfo.hProcess, address, buffer, size, nullptr) != FALSE);
+	DWORD oldprotect_flag;
+	VirtualProtectEx(pInfo.hProcess,address, size, PAGE_EXECUTE_READWRITE, &oldprotect_flag);
+	const auto result = WriteProcessMemory(pInfo.hProcess, address, buffer, size, nullptr);
+	VirtualProtectEx(pInfo.hProcess,address, size, oldprotect_flag, &oldprotect_flag);
+
+	if (result != FALSE) {
+		return true;
+	}
+
+	Log::WriteLine(
+		__FUNCTION__ "[%x] Error [%s] ", (uintptr_t)address , std::system_category().message(GetLastError()).c_str());
+	return false;
 }
 
 bool SyringeDebugger::ReadMem(void const* address, void* destinationbuffer, DWORD size)
 {
-	return (ReadProcessMemory(pInfo.hProcess, address, destinationbuffer, size, nullptr) != FALSE);
+	const auto result = ReadProcessMemory(pInfo.hProcess, address, destinationbuffer, size, nullptr);
+	if (result != FALSE) {
+		return true;
+	}
+
+	Log::WriteLine(
+		__FUNCTION__ "[%x] Error [%s]", (uintptr_t)address, std::system_category().message(GetLastError()).c_str());
+	//throw_lasterror_or(ERROR_ERRORS_ENCOUNTERED, exe);
+	return false;
 }
 
 VirtualMemoryHandle SyringeDebugger::AllocMem(void* address, size_t size)
@@ -296,10 +317,10 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 						__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
 						"- %s", hook->lib, hook->proc);
 				}
-				else
-				{
-					Log::WriteLine(__FUNCTION__ ": %s [0x%x , %s , %d]" , hook->lib , hook->hookaddr , hook->proc , hook->num_overridden);
-				}
+				//else
+				//{
+				//	Log::WriteLine(__FUNCTION__ ": %s [0x%x , %s , %d]" , hook->lib , hook->hookaddr , hook->proc , hook->num_overridden);
+				//}
 
 				++loop_LoadLibrary;
 			}
@@ -307,10 +328,14 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 			if (loop_LoadLibrary != v_AllHooks.end())
 			{
 				auto const& hook = *loop_LoadLibrary;
+
 				PatchMem(&GetData()->LibName, hook->lib, MaxNameLength);
 				PatchMem(&GetData()->ProcName, hook->proc, MaxNameLength);
 
 				context.Eip = reinterpret_cast<DWORD>(&GetData()->LoadLibraryFunc);
+
+				if(SyringeDebugger::LoggerOptions::LogLoadLibFunc)
+					Log::WriteLine(__FUNCTION__ ": Executing LoadLibraryFunc [proc : %s - Lib :%s]" , hook->proc , hook->lib);
 			}
 			else
 			{
@@ -355,6 +380,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					// overridden = number of overriden of the hook
 					HooksAccumulateData hooks_ { 0u , 0u };
 
+					// normalize the numOverriden
 					for (const auto& hook : breakpoins_breaks.hooks) {
 						if (hook.proc_address && ((uintptr_t)hook.proc_address) != 0x0) {
 							if (hooks_.numOverriden < hook.num_overridden) {
@@ -411,6 +437,10 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 								checked = true;
 							}
+							else if(!hook.num_overridden){
+								Log::WriteLine(
+									__FUNCTION__ ":Hook at [0x%x = %s , %d] cannot be identified because it 0 overriden jmp or call", breakpoints_entry, hook.proc, hook.num_overridden);
+							}
 
 							// write hook caller code
 							ApplyPatch(memoryptr, Assembly::hook_code_call, 33u); // code
@@ -437,7 +467,10 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					// write overridden bytes to the end
 					// this for return 0 case ,..
 					if (!overridenMem.empty()) {
-						PatchMem(static_cast<BYTE*>(breakpoints_entry), memoryptr, tempmemory.size());
+
+						// temporary memory data is on top
+						// dont need to read , just move the data
+						ApplyPatch_NoMove(memoryptr, overridenMem.data(), overridenMem.size());
 						memoryptr += overridenMem.size();
 					}
 
@@ -450,17 +483,20 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					JMP_REL jmp_back { Assembly::JMP ,  jmp_back_rel };
 					ApplyPatch(memoryptr, jmp_back);
 					//ApplyPatch(memoryptr + 0x01, jmp_back_rel);
-
+					
 					//write finished hook data to reserved memory
 					PatchMem(breakpoins_breaks.p_caller_code.get(), tempmemory.data(), tempmemory.size());
 
 					// replace the original instruction with hook call
 
-					tempmemory.resize(std::max(hooks_.numOverriden, JMP_REL::size()) , Assembly::NOP);
+					tempmemory.resize(sz);
 
+					// move the hook data to temp memory
+					ReadMem(breakpoins_breaks.p_caller_code.get(), tempmemory.data(), sz);
 					const auto p_original_code = static_cast<BYTE*>(breakpoints_entry);
 					const auto originalcode_rel = GetRelativeOffset(p_original_code + JMP_REL::size(), breakpoins_breaks.p_caller_code.get());
 					//resize the temp memory then fill it with NOP
+					tempmemory.assign(std::max(hooks_.numOverriden, JMP_REL::size()), Assembly::NOP);
 					//apply the jump opcode
 					JMP_REL hookjmpOpcode { Assembly::JMP ,  originalcode_rel };
 					ApplyPatch(tempmemory.data(), hookjmpOpcode);
@@ -468,6 +504,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					//ApplyPatch(tempmemory.data() + 0x01, originalcode_rel);
 					//patch the memory to the destination
 					PatchMem(p_original_code, tempmemory.data(), tempmemory.size());
+
 				}
 
 				Log::Flush();
@@ -475,8 +512,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 				bHooksCreated = true;
 			}
 
-			/*
-			// restore*/
+			// restore
 			PatchMem(exceptAddr, &Breakpoints[exceptAddr].original_opcode, 1);
 
 			// single step mode
@@ -520,6 +556,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 		return DBG_CONTINUE;
 	}
 	default:
+	{
 		//	Log::WriteLine(
 //		__FUNCTION__ ": Exception (Code: 0x%08X at 0x%08X)!", exceptCode,
 //		exceptAddr);
@@ -577,6 +614,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 		return DBG_EXCEPTION_NOT_HANDLED;
 	}
+	}
 
 	return DBG_CONTINUE;
 }
@@ -600,14 +638,15 @@ void SyringeDebugger::Run(std::string_view const arguments)
 	Log::WriteLine(__FUNCTION__ ": Writing DLL loader & caller code...");
 
 
-	std::array<BYTE, AllocDataSize> data;
+	std::array<BYTE, AllocDataSize> data {};
 	static_assert(AllocData::CodeSize >= Assembly::sizeof_load_library, "Invalid Size !");
+	const auto pData = this->GetData();
 	ApplyPatch(data.data(), Assembly::load_library);
-	ApplyPatch(data.data() + 0x04, &GetData()->LibName);
+	ApplyPatch(data.data() + 0x04, &pData->LibName);
 	ApplyPatch(data.data() + 0x0A, pImLoadLibrary);
-	ApplyPatch(data.data() + 0x13, &GetData()->ProcName);
+	ApplyPatch(data.data() + 0x13, &pData->ProcName);
 	ApplyPatch(data.data() + 0x1A, pImGetProcAddress);
-	ApplyPatch(data.data() + 0x1F, &GetData()->ProcAddress);
+	ApplyPatch(data.data() + 0x1F, &pData->ProcAddress);
 	constexpr size_t datasize = data.size();
 
 	if(!PatchMem(pAlloc, data.data(), datasize)){
@@ -615,7 +654,7 @@ void SyringeDebugger::Run(std::string_view const arguments)
 		return;
 	}
 
-	Log::WriteLine(__FUNCTION__ ": pcLoadLibrary = 0x%08X", &GetData()->LoadLibraryFunc);
+	Log::WriteLine(__FUNCTION__ ": pcLoadLibrary = 0x%08X", &pData->LoadLibraryFunc);
 
 	// breakpoints for DLL loading and proc address retrieving
 	bDLLsLoaded = false;
@@ -916,7 +955,9 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 					)
 				{
 
-					Log::WriteLine(__FUNCTION__ ": Removing %s [0x%x , %s , %d] hook.", data.lib, data.hookaddr, data.proc, data.num_overridden);
+					if(SyringeDebugger::LoggerOptions::LogHookRemove)
+						Log::WriteLine(__FUNCTION__ ": Removing %s [0x%x , %s , %d] hook.", data.lib, data.hookaddr, data.proc, data.num_overridden);
+					
 					return true;
 				}
 			}

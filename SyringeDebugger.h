@@ -19,6 +19,11 @@ static constexpr size_t MaxNameLength = 0x100u;
 class SyringeDebugger {
 public:
 
+	struct LoggerOptions {
+		static bool LogLoadLibFunc;
+		static bool LogHookRemove;
+	};
+
 	using dllptr = void*;
 	using eipptr = void*;
 	using MemoryHelper = std::vector<BYTE>;
@@ -86,7 +91,6 @@ public:
 
 		return ok ? v : std::optional<T> {};
 	}
-
 
 private:
 	void RetrieveInfo();

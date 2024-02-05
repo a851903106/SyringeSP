@@ -39,17 +39,23 @@ int Run(std::string_view const arguments) {
 					SyringeDebugger::IgnoredDll.push_back(cur);
 				}
 			}
-			else {
-				Log::WriteLine(
-					"WinMain: IgnorableDlls is empty ");
+		}
+
+		if(inirw::IniKey* iniKey_HookRemoved = iniFile.get_key_and_name("Logger", "LogHookRemoved")) {
+			const std::string nRes = iniKey_HookRemoved->ValueCommentPair.get_value();
+
+			if (!nRes.empty()) {
+				inirw::TryParse(nRes.c_str(), &SyringeDebugger::LoggerOptions::LogHookRemove);
 			}
-
-		}
-		else {
-			Log::WriteLine(
-				"WinMain: Key not found ");
 		}
 
+		if (inirw::IniKey* iniKey_LoadLib = iniFile.get_key_and_name("Logger", "LogLoadLib")) {
+			const  std::string nRes = iniKey_LoadLib->ValueCommentPair.get_value();
+
+			if (!nRes.empty()){
+				inirw::TryParse(nRes.c_str(), &SyringeDebugger::LoggerOptions::LogLoadLibFunc);
+			}
+		}
 	}
 	else {
 		Log::WriteLine(
