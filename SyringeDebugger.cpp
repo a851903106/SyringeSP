@@ -59,12 +59,12 @@ typedef struct _JCC_REL {
 
 struct Assembly {
 
-	static constexpr BYTE INIT = 0x00 ,
-	INT3 = 0xCC ,
-	NOP = 0x90 ,
-	CALL = 0xE8 ,
-	JMP = 0xE9 ,
-	JLE = 0x7E;
+	static constexpr BYTE INIT = 0x00,
+		INT3 = 0xCC,
+		NOP = 0x90,
+		CALL = 0xE8,
+		JMP = 0xE9,
+		JLE = 0x7E;
 
 	static constexpr BYTE const this2fastcall[] = {
 			0x8B, 0x54, 0xE4, 0x08, //MOV EDX, [ESP + 8]
@@ -175,7 +175,7 @@ struct Assembly {
 
 };
 
-void SyringeDebugger::ApplyPatches() {}
+void SyringeDebugger::ApplyPatches() { }
 
 //TODO : Other Type of hook supports !
 
@@ -184,8 +184,7 @@ void SyringeDebugger::ApplyPatches() {}
 *	Type -> raw
 *		 -> address
 */
-void SyringeDebugger::DebugProcess(std::string_view const arguments)
-{
+void SyringeDebugger::DebugProcess(std::string_view const arguments) {
 	STARTUPINFO startupInfo{ sizeof(startupInfo) };
 
 	SetEnvironmentVariable("_NO_DEBUG_HEAP", "1");
@@ -202,26 +201,34 @@ void SyringeDebugger::DebugProcess(std::string_view const arguments)
 	}
 }
 
-bool SyringeDebugger::PatchMem(void* address, void const* buffer, DWORD size)
-{
-	DWORD oldprotect_flag;
-	VirtualProtectEx(pInfo.hProcess,address, size, PAGE_EXECUTE_READWRITE, &oldprotect_flag);
-	const auto result = WriteProcessMemory(pInfo.hProcess, address, buffer, size, nullptr);
-	VirtualProtectEx(pInfo.hProcess,address, size, oldprotect_flag, &oldprotect_flag);
+bool SyringeDebugger::PatchMem(void* address, void const* buffer, DWORD size) {
+
+	BOOL result = WriteProcessMemory(pInfo.hProcess, address, buffer, size, nullptr);
+
+	if (result == FALSE) {
+		DWORD oldprotect_flag;
+		VirtualProtectEx(pInfo.hProcess, address, size, PAGE_EXECUTE_READWRITE, &oldprotect_flag);
+		result = WriteProcessMemory(pInfo.hProcess, address, buffer, size, nullptr);
+		VirtualProtectEx(pInfo.hProcess, address, size, oldprotect_flag, &oldprotect_flag);
+
+	} else {
+		return true;
+	}
 
 	if (result != FALSE) {
 		return true;
 	}
 
 	Log::WriteLine(
-		__FUNCTION__ "[%x] Error [%s] ", (uintptr_t)address , std::system_category().message(GetLastError()).c_str());
+		__FUNCTION__ "[%x] Error [%s] ", (uintptr_t)address, std::system_category().message(GetLastError()).c_str());
+	
 	return false;
 }
 
-bool SyringeDebugger::ReadMem(void const* address, void* destinationbuffer, DWORD size)
-{
+bool SyringeDebugger::ReadMem(void const* address, void* destinationbuffer, DWORD size) {
 	const auto result = ReadProcessMemory(pInfo.hProcess, address, destinationbuffer, size, nullptr);
-	if (result != FALSE) {
+	if (result != FALSE)
+	{
 		return true;
 	}
 
@@ -231,19 +238,19 @@ bool SyringeDebugger::ReadMem(void const* address, void* destinationbuffer, DWOR
 	return false;
 }
 
-VirtualMemoryHandle SyringeDebugger::AllocMem(void* address, size_t size)
-{
-	if (VirtualMemoryHandle res{ pInfo.hProcess, address, size }) {
+VirtualMemoryHandle SyringeDebugger::AllocMem(void* address, size_t size) {
+	if (VirtualMemoryHandle res{ pInfo.hProcess, address, size })
+	{
 		return res;
 	}
 
 	throw_lasterror_or(ERROR_ERRORS_ENCOUNTERED, exe);
 }
 
-bool SyringeDebugger::SetBP(void* address)
-{
+bool SyringeDebugger::SetBP(void* address) {
 	// save overwritten code and set INT 3
-	if (auto& opcode = Breakpoints[address].original_opcode; opcode == 0x00) {
+	if (auto& opcode = Breakpoints[address].original_opcode; opcode == 0x00)
+	{
 		auto const buffer = Assembly::INT3;
 		ReadMem(address, &opcode, 1);
 		return PatchMem(address, &buffer, 1);
@@ -252,8 +259,7 @@ bool SyringeDebugger::SetBP(void* address)
 	return true;
 }
 
-DWORD __fastcall SyringeDebugger::GetRelativeOffset(void const* pFrom, void const* pTo)
-{
+DWORD __fastcall SyringeDebugger::GetRelativeOffset(void const* pFrom, void const* pTo) {
 	auto const from = reinterpret_cast<DWORD>(pFrom);
 	auto const to = reinterpret_cast<DWORD>(pTo);
 
@@ -265,8 +271,7 @@ DWORD __fastcall SyringeDebugger::GetRelativeOffset(void const* pFrom, void cons
 //
 //}
 
-DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
-{
+DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 	auto const exceptCode = dbgEvent.u.Exception.ExceptionRecord.ExceptionCode;
 	auto const exceptAddr = dbgEvent.u.Exception.ExceptionRecord.ExceptionAddress;
 
@@ -309,11 +314,13 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 			else
 			{
 				auto const& hook = *loop_LoadLibrary;
-				if(hook->hookaddr != 0) {
-					
+				if (hook->hookaddr != 0)
+				{
+
 					ReadMem(&GetData()->ProcAddress, &hook->proc_address, 4);
 
-					if (!hook->proc_address) {
+					if (!hook->proc_address)
+					{
 						Log::WriteLine(
 							__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
 							"- %s", hook->lib, hook->proc);
@@ -335,9 +342,9 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 				PatchMem(&GetData()->ProcName, hook->proc, MaxNameLength);
 
 				context.Eip = reinterpret_cast<DWORD>(&GetData()->LoadLibraryFunc);
-
-				if(SyringeDebugger::LoggerOptions::LogLoadLibFunc)
-					Log::WriteLine(__FUNCTION__ ": Executing LoadLibraryFunc [proc : %s - Lib :%s]" , hook->proc , hook->lib);
+			
+				if (SyringeDebugger::LoggerOptions::LogLoadLibFunc)
+					Log::WriteLine(__FUNCTION__ ": Executing LoadLibraryFunc [proc : %s - Lib :%s]", hook->proc, hook->lib);
 			}
 			else
 			{
@@ -365,8 +372,8 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 				Log::WriteLine(__FUNCTION__ ": Creating code hooks.");
 
 				//temporary vector for code Byte
-				MemoryHelper tempmemory {};
-				MemoryHelper overridenMem {};
+				MemoryHelper tempmemory{};
+				MemoryHelper overridenMem{};
 
 				for (auto& [breakpoints_entry, breakpoins_breaks] : Breakpoints)
 				{
@@ -380,12 +387,15 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 					// count = how much hook is present
 					// overridden = number of overriden of the hook
-					HooksAccumulateData hooks_ { 0u , 0u };
+					HooksAccumulateData hooks_{ 0u , 0u };
 
 					// normalize the numOverriden
-					for (const auto& hook : breakpoins_breaks.hooks) {
-						if (hook.proc_address && ((uintptr_t)hook.proc_address) != 0x0) {
-							if (hooks_.numOverriden < hook.num_overridden) {
+					for (const auto& hook : breakpoins_breaks.hooks)
+					{
+						if (hook.proc_address && ((uintptr_t)hook.proc_address) != 0x0)
+						{
+							if (hooks_.numOverriden < hook.num_overridden)
+							{
 								hooks_.numOverriden = hook.num_overridden;
 							}
 
@@ -439,7 +449,8 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 								checked = true;
 							}
-							else if(!hook.num_overridden){
+							else if (!hook.num_overridden)
+							{
 								Log::WriteLine(
 									__FUNCTION__ ":Hook at [0x%x = %s , %d] cannot be identified because it 0 overriden jmp or call", breakpoints_entry, hook.proc, hook.num_overridden);
 							}
@@ -457,7 +468,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 							//	nullptr, "Syringe Is halted before run",
 							//	reinterpret_cast<LPCSTR>("TEST"), MB_OK | MB_ICONINFORMATION);
 
-							CALL_REL relative_call { Assembly::CALL , hook_call_rel };
+							CALL_REL relative_call{ Assembly::CALL , hook_call_rel };
 							//on the original syringe source this was 0x09 
 							// replaced to 0x08 since the operand from CALL_REL will be copied too
 							ApplyPatch(memoryptr + 0x08, relative_call);
@@ -468,7 +479,8 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 
 					// write overridden bytes to the end
 					// this for return 0 case ,..
-					if (!overridenMem.empty()) {
+					if (!overridenMem.empty())
+					{
 
 						// temporary memory data is on top
 						// dont need to read , just move the data
@@ -482,10 +494,10 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 						breakpoins_breaks.p_caller_code.get() + (memoryptr - tempmemory.data() + JMP_REL::size()),
 						static_cast<BYTE*>(breakpoints_entry) + std::max(hooks_.numOverriden, JMP_REL::size()));
 
-					JMP_REL jmp_back { Assembly::JMP ,  jmp_back_rel };
+					JMP_REL jmp_back{ Assembly::JMP ,  jmp_back_rel };
 					ApplyPatch(memoryptr, jmp_back);
 					//ApplyPatch(memoryptr + 0x01, jmp_back_rel);
-					
+
 					//write finished hook data to reserved memory
 					PatchMem(breakpoins_breaks.p_caller_code.get(), tempmemory.data(), tempmemory.size());
 
@@ -500,7 +512,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 					//resize the temp memory then fill it with NOP
 					tempmemory.assign(std::max(hooks_.numOverriden, JMP_REL::size()), Assembly::NOP);
 					//apply the jump opcode
-					JMP_REL hookjmpOpcode { Assembly::JMP ,  originalcode_rel };
+					JMP_REL hookjmpOpcode{ Assembly::JMP ,  originalcode_rel };
 					ApplyPatch(tempmemory.data(), hookjmpOpcode);
 					//insert the jump back address
 					//ApplyPatch(tempmemory.data() + 0x01, originalcode_rel);
@@ -617,8 +629,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
 	return DBG_CONTINUE;
 }
 
-void SyringeDebugger::Run(std::string_view const arguments)
-{
+void SyringeDebugger::Run(std::string_view const arguments) {
 	constexpr auto AllocDataSize = sizeof(AllocData);
 
 	static_assert(AllocDataSize == 580u, "InvalidAllocSize");
@@ -636,7 +647,7 @@ void SyringeDebugger::Run(std::string_view const arguments)
 	Log::WriteLine(__FUNCTION__ ": Writing DLL loader & caller code...");
 
 
-	std::array<BYTE, AllocDataSize> data {};
+	std::array<BYTE, AllocDataSize> data{};
 	static_assert(AllocData::CodeSize >= Assembly::sizeof_load_library, "Invalid Size !");
 	const auto pData = this->GetData();
 	ApplyPatch(data.data(), Assembly::load_library);
@@ -647,7 +658,8 @@ void SyringeDebugger::Run(std::string_view const arguments)
 	ApplyPatch(data.data() + 0x1F, &pData->ProcAddress);
 	constexpr size_t datasize = data.size();
 
-	if(!PatchMem(pAlloc, data.data(), datasize)){
+	if (!PatchMem(pAlloc, data.data(), datasize))
+	{
 		Log::WriteLine(__FUNCTION__ ": LoadLibrary patching failed !");
 		return;
 	}
@@ -714,11 +726,13 @@ void SyringeDebugger::Run(std::string_view const arguments)
 			break;
 		}
 
-		if (dbgEvent.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT) {
+		if (dbgEvent.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT)
+		{
 			exit_code = dbgEvent.u.ExitProcess.dwExitCode;
 			break;
 		}
-		else if (dbgEvent.dwDebugEventCode == RIP_EVENT) {
+		else if (dbgEvent.dwDebugEventCode == RIP_EVENT)
+		{
 			break;
 		}
 
@@ -732,13 +746,12 @@ void SyringeDebugger::Run(std::string_view const arguments)
 	Log::WriteLine();
 }
 
-void SyringeDebugger::RemoveBP(LPVOID const address, bool const restoreOpcode)
-{
+void SyringeDebugger::RemoveBP(LPVOID const address, bool const restoreOpcode) {
 	if (auto const i = Breakpoints.find(address); i != Breakpoints.end())
 	{
 		if (restoreOpcode)
 		{
-			if(PatchMem(address, &i->second.original_opcode, 1))
+			if (PatchMem(address, &i->second.original_opcode, 1))
 				Log::WriteLine("Syringe Attempt to Remove[%X] Break points", address);
 		}
 
@@ -746,12 +759,12 @@ void SyringeDebugger::RemoveBP(LPVOID const address, bool const restoreOpcode)
 	}
 }
 
-void SyringeDebugger::RetrieveInfo()
-{
+void SyringeDebugger::RetrieveInfo() {
 	Log::WriteLine(
 		__FUNCTION__ ": Retrieving info from the executable file...");
 
-	try {
+	try
+	{
 		PortableExecutable pe{ exe };
 		auto const dwImageBase = pe.GetImageBase();
 
@@ -765,26 +778,32 @@ void SyringeDebugger::RetrieveInfo()
 		pImLoadLibrary = nullptr;
 		pImGetProcAddress = nullptr;
 
-		for (auto const& import : pe.GetImports()) {
-			if (_strcmpi(import.Name.c_str(), "KERNEL32.DLL") == 0) {
-				for (auto const& thunk : import.vecThunkData) {
-					if (_strcmpi(thunk.Name.c_str(), "GETPROCADDRESS") == 0) {
+		for (auto const& import : pe.GetImports())
+		{
+			if (_strcmpi(import.Name.c_str(), "KERNEL32.DLL") == 0)
+			{
+				for (auto const& thunk : import.vecThunkData)
+				{
+					if (_strcmpi(thunk.Name.c_str(), "GETPROCADDRESS") == 0)
+					{
 						pImGetProcAddress = reinterpret_cast<void*>(dwImageBase + thunk.Address);
 					}
-					else if (_strcmpi(thunk.Name.c_str(), "LOADLIBRARYA") == 0) {
+					else if (_strcmpi(thunk.Name.c_str(), "LOADLIBRARYA") == 0)
+					{
 						pImLoadLibrary = reinterpret_cast<void*>(dwImageBase + thunk.Address);
 					}
 				}
 			}
 		}
-	}
-	catch (...) {
+	} catch (...)
+	{
 		Log::WriteLine(__FUNCTION__ ": Failed to open the executable!");
 
 		throw;
 	}
 
-	if (!pImGetProcAddress || !pImLoadLibrary) {
+	if (!pImGetProcAddress || !pImLoadLibrary)
+	{
 		Log::WriteLine(
 			__FUNCTION__ ": ERROR: Either a LoadLibraryA or a GetProcAddress "
 			"import could not be found!");
@@ -827,24 +846,25 @@ void SyringeDebugger::RetrieveInfo()
 
 #include <sstream>
 
-std::string convert_int(int n)
-{
+std::string convert_int(int n) {
 	std::stringstream ss;
 	ss << n;
 	return ss.str();
 }
 
-void SyringeDebugger::FindDLLs()
-{
+void SyringeDebugger::FindDLLs() {
 	Breakpoints.clear();
 	HookOverrideBuffer buffer_remove;
 
-	for (auto file = FindFile("*.dll"); file; ++file) {
+	for (auto file = FindFile("*.dll"); file; ++file)
+	{
 		std::string_view const fn(file->cFileName);
 
-		if (!IgnoredDll.empty()) {
+		if (!IgnoredDll.empty())
+		{
 			const auto Iter = std::find_if(IgnoredDll.begin(), IgnoredDll.end(), [&](const auto& nStr) { return nStr == fn; });
-			if (Iter != IgnoredDll.end()) {
+			if (Iter != IgnoredDll.end())
+			{
 				Log::WriteLine(__FUNCTION__ ": Ignoring DLL: \"%.*s\"", printable(fn));
 				continue;
 			}
@@ -852,20 +872,24 @@ void SyringeDebugger::FindDLLs()
 		//Log::WriteLine(
 		//	__FUNCTION__ ": Potential DLL: \"%.*s\"", printable(fn));
 
-		try {
+		try
+		{
 			PortableExecutable const DLL{ fn };
 			HookBuffer buffer;
 
 			bool canLoad = false;
-			if (auto const hooks = DLL.FindSection(".syhks00")) {
+			if (auto const hooks = DLL.FindSection(".syhks00"))
+			{
 				canLoad = ParseHooksSection(DLL, *hooks, buffer);
 			}
 
-			if (canLoad) {
+			if (canLoad)
+			{
 				Log::WriteLine(
 					__FUNCTION__ ": Recognized DLL: \"%.*s\"", printable(fn));
 
-				if (auto const hooks = DLL.FindSection(".syhks01")) {
+				if (auto const hooks = DLL.FindSection(".syhks01"))
+				{
 					if (ParseOverrideHooksSection(DLL, *hooks, buffer_remove, buffer))
 						Log::WriteLine(
 						__FUNCTION__ ": Found Override Hook Section : \"%.*s\"", printable(fn));
@@ -877,26 +901,30 @@ void SyringeDebugger::FindDLLs()
 				{
 					canLoad = res;
 				}
-				else if (auto const hosts = DLL.FindSection(".syexe00")) {
+				else if (auto const hosts = DLL.FindSection(".syexe00"))
+				{
 					canLoad = CanHostDLL(DLL, *hosts);
 				}
 			}
 
-			if (canLoad) {
-				for (auto const&[eip , hooks] : buffer.hooks) {
+			if (canLoad)
+			{
+				for (auto const& [eip, hooks] : buffer.hooks)
+				{
 					auto& h = Breakpoints[eip];
 					h.p_caller_code.clear();
 					h.original_opcode = 0x00;
 					h.hooks.insert(h.hooks.end(), hooks.begin(), hooks.end());
 				}
 			}
-			else if (!buffer.hooks.empty()) {
+			else if (!buffer.hooks.empty())
+			{
 				Log::WriteLine(
 					__FUNCTION__ ": DLL load was prevented: \"%.*s\"",
 					printable(fn));
 			}
-		}
-		catch (...) {
+		} catch (...)
+		{
 			Log::WriteLine(
 				__FUNCTION__ ": DLL Parse failed: \"%.*s\"", printable(fn));
 		}
@@ -905,16 +933,19 @@ void SyringeDebugger::FindDLLs()
 	// summarize all hooks
 	v_AllHooks.clear();
 	SyringeDebugger::RemoveBreakPoints(Breakpoints, buffer_remove);
-	for (auto& it : Breakpoints) {
-		for (auto& data : it.second.hooks) {
+	for (auto& it : Breakpoints)
+	{
+		for (auto& data : it.second.hooks)
+		{
 
 			auto const nTempData = convert_int(data.hookaddr);
 
-			if ((nTempData.size() + 1) != 8){
+			if ((nTempData.size() + 1) != 8)
+			{
 				Log::WriteLine(__FUNCTION__ ": Found Hook with less or more than 8 characters , it maybe invalid one [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
 			}
 
-			if(data.num_overridden == 0)
+			if (data.num_overridden == 0)
 				Log::WriteLine(__FUNCTION__ ": Found Hook with 0 num overriden , it maybe better to explicitly put the correct num overriden [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
 			else if (data.num_overridden < 5)
 				Log::WriteLine(__FUNCTION__ ": Found Hook with less than 5 bytes num overriden , it maybe better to move the hook location if possible [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
@@ -925,7 +956,7 @@ void SyringeDebugger::FindDLLs()
 		}
 
 		if (it.second.hooks.size() > 1)
-			Log::WriteLine(__FUNCTION__ ":[0x%x , %s , %d] Is Hooked by %d function !.", it.second.hooks[0].hookaddr , it.second.hooks[0].proc , it.second.hooks[0].num_overridden , it.second.hooks.size());
+			Log::WriteLine(__FUNCTION__ ":[0x%x , %s , %d] Is Hooked by %d function !.", it.second.hooks[0].hookaddr, it.second.hooks[0].proc, it.second.hooks[0].num_overridden, it.second.hooks.size());
 
 	}
 
@@ -933,8 +964,7 @@ void SyringeDebugger::FindDLLs()
 	Log::WriteLine();
 }
 
-void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakpoints, HookOverrideBuffer& excludeHooksData)
-{
+void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakpoints, HookOverrideBuffer& excludeHooksData) {
 	if (excludeHooksData.GetCurentSize() <= 0)
 		return;
 
@@ -944,8 +974,9 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 			continue;
 
 		auto Iter = std::remove_if(std::begin(breaks.second.hooks), std::end(breaks.second.hooks), [&excludeHooksData](const SyringeDebugger::Hook& data) {
-			
-			for (const auto& nVec : excludeHooksData.hooks) {
+
+			for (const auto& nVec : excludeHooksData.hooks)
+			{
 				if ((_strcmpi(data.lib, nVec.lib) == 0) && //same dll
 					data.hookaddr == nVec.hookaddr// same address
 					//&& (_strcmpi(nBreakHook.proc , nVec.proc) == 0)
@@ -953,33 +984,35 @@ void SyringeDebugger::RemoveBreakPoints(std::map<eipptr, BreakpointInfo>& breakp
 					)
 				{
 
-					if(SyringeDebugger::LoggerOptions::LogHookRemove)
+					if (SyringeDebugger::LoggerOptions::LogHookRemove)
 						Log::WriteLine(__FUNCTION__ ": Removing %s [0x%x , %s , %d] hook.", data.lib, data.hookaddr, data.proc, data.num_overridden);
-					
+
 					return true;
 				}
 			}
 
 			return false;
-		});
+			});
 
-		breaks.second.hooks.erase(Iter , std::end(breaks.second.hooks));
+		breaks.second.hooks.erase(Iter, std::end(breaks.second.hooks));
 	}
 }
 
 
 bool SyringeDebugger::ParseInjFileHooks(
-	std::string_view const lib, HookBuffer& hooks , const char* extension)
-{
+	std::string_view const lib, HookBuffer& hooks, const char* extension) {
 	auto const inj = std::string(lib) + extension;
 
-	if (auto const file = FileHandle(_fsopen(inj.c_str(), "r", _SH_DENYWR))) {
-		Log::WriteLine(__FUNCTION__ ": %s %s file Found , Parsing." , lib , extension);
+	if (auto const file = FileHandle(_fsopen(inj.c_str(), "r", _SH_DENYWR)))
+	{
+		Log::WriteLine(__FUNCTION__ ": %s %s file Found , Parsing.", lib, extension);
 
 		constexpr auto Size = 0x100;
 		char line[Size];
-		while (fgets(line, Size, file)) {
-			if (*line != ';' && *line != '\r' && *line != '\n') {
+		while (fgets(line, Size, file))
+		{
+			if (*line != ';' && *line != '\r' && *line != '\n')
+			{
 				void* eip = nullptr;
 				auto n_over = 0u;
 				char func[MaxNameLength];
@@ -1002,8 +1035,7 @@ bool SyringeDebugger::ParseInjFileHooks(
 }
 
 bool SyringeDebugger::CanHostDLL(
-	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hosts) const
-{
+	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hosts) const {
 	constexpr auto const Size = sizeof(hostdecl);
 	auto const base = DLL.GetImageBase();
 
@@ -1011,20 +1043,26 @@ bool SyringeDebugger::CanHostDLL(
 	auto const end = begin + hosts.SizeOfRawData;
 
 	std::string hostName;
-	for (auto ptr = begin; ptr < end; ptr += Size) {
+	for (auto ptr = begin; ptr < end; ptr += Size)
+	{
 		hostdecl h;
-		if (DLL.ReadBytes(ptr, Size, &h)) {
-			if (h.hostNamePtr) {
+		if (DLL.ReadBytes(ptr, Size, &h))
+		{
+			if (h.hostNamePtr)
+			{
 				auto const rawNamePtr = DLL.VirtualToRaw(h.hostNamePtr - base);
-				if (DLL.ReadCString(rawNamePtr, hostName)) {
+				if (DLL.ReadCString(rawNamePtr, hostName))
+				{
 					hostName += ".exe";
-					if (!_strcmpi(hostName.c_str(), exe.c_str())) {
+					if (!_strcmpi(hostName.c_str(), exe.c_str()))
+					{
 						return true;
 					}
 				}
 			}
 		}
-		else {
+		else
+		{
 			break;
 		}
 	}
@@ -1033,8 +1071,7 @@ bool SyringeDebugger::CanHostDLL(
 
 bool SyringeDebugger::ParseHooksSection(
 	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks,
-	HookBuffer& buffer)
-{
+	HookBuffer& buffer) {
 	constexpr auto const Size = sizeof(hookdecl);
 	auto const base = DLL.GetImageBase();
 	auto const filename = std::string_view(DLL.GetFilename());
@@ -1045,20 +1082,25 @@ bool SyringeDebugger::ParseHooksSection(
 	std::string hookName{};
 	hookName.reserve(0x100);
 
-	for (auto ptr = begin; ptr < end; ptr += Size) {
+	for (auto ptr = begin; ptr < end; ptr += Size)
+	{
 		hookdecl h{};
-		if (DLL.ReadBytes(ptr, Size, &h)) {
+		if (DLL.ReadBytes(ptr, Size, &h))
+		{
 			// msvc linker inserts arbitrary padding between variables that come
 			// from different translation units
-			if (h.hookNamePtr) {
+			if (h.hookNamePtr)
+			{
 				auto const rawNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
-				if (DLL.ReadCString(rawNamePtr, hookName)) {
+				if (DLL.ReadCString(rawNamePtr, hookName))
+				{
 					//Log::WriteLine(__FUNCTION__ ": [%s]Hook, %x=%s, %x", DLL.GetFilename(), h.hookAddr, hookName.c_str(), h.hookSize);
 					buffer.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
 				}
 			}
 		}
-		else {
+		else
+		{
 			Log::WriteLine(__FUNCTION__ ": Bytes read failed");
 			return false;
 		}
@@ -1069,8 +1111,7 @@ bool SyringeDebugger::ParseHooksSection(
 
 bool SyringeDebugger::ParseOverrideHooksSection(
 	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks,
-	HookOverrideBuffer& hookneedtoremove , HookBuffer& bufferAdd)
-{
+	HookOverrideBuffer& hookneedtoremove, HookBuffer& bufferAdd) {
 	constexpr auto const Size = sizeof(hookdecl);
 	auto const base = DLL.GetImageBase();
 	auto const filename = std::string_view(DLL.GetFilename());
@@ -1084,23 +1125,28 @@ bool SyringeDebugger::ParseOverrideHooksSection(
 	std::string moduleName{};
 	moduleName.reserve(0x100);
 
-	for (auto ptr = begin; ptr < end; ptr += Size) {
+	for (auto ptr = begin; ptr < end; ptr += Size)
+	{
 		overridehookdecl h{};
-		if (DLL.ReadBytes(ptr, Size, &h)) {
+		if (DLL.ReadBytes(ptr, Size, &h))
+		{
 			// msvc linker inserts arbitrary padding between variables that come
 			// from different translation units
-			if (h.hookNamePtr && h.overrideModuleName) {
+			if (h.hookNamePtr && h.overrideModuleName)
+			{
 				auto const rawhookNamePtr = DLL.VirtualToRaw(h.hookNamePtr - base);
 				auto const rawmoduleNamePtr = DLL.VirtualToRaw(h.overrideModuleName - base);
-				if (DLL.ReadCString(rawhookNamePtr, hookName) && DLL.ReadCString(rawmoduleNamePtr,moduleName)) {
+				if (DLL.ReadCString(rawhookNamePtr, hookName) && DLL.ReadCString(rawmoduleNamePtr, moduleName))
+				{
 					hookneedtoremove.add(h.hookAddr, moduleName, hookName, h.hookSize);
 
-					if(h.hookSize != -1)
+					if (h.hookSize != -1)
 						bufferAdd.add(reinterpret_cast<void*>(h.hookAddr), filename, hookName, h.hookSize);
 				}
 			}
 		}
-		else {
+		else
+		{
 			Log::WriteLine(__FUNCTION__ ": Bytes read failed");
 			return false;
 		}
@@ -1120,7 +1166,7 @@ bool SyringeDebugger::ParsePatchSection(
 	auto const filename = DLL.GetFilename();
 
 	void* ptrbuffer;
-	const int len = GetSection(DLL ,".patch", &ptrbuffer);
+	const int len = GetSection(DLL, ".patch", &ptrbuffer);
 	if (!len)
 		return false;
 
@@ -1131,7 +1177,7 @@ bool SyringeDebugger::ParsePatchSection(
 			continue;
 
 		Log::WriteLine(
-			__FUNCTION__ ": Found .patch Section :[%s - %d] [0x%x]", filename , offset, pPatch->offset);
+			__FUNCTION__ ": Found .patch Section :[%s - %d] [0x%x]", filename, offset, pPatch->offset);
 
 		SyringeDebugger::PatcherMap[filename] = pPatch;
 	}
@@ -1144,14 +1190,15 @@ bool SyringeDebugger::ParsePatchSection(
 // the hooks aren't included. if the function is not exported, we have to
 // rely on other methods.
 bool SyringeDebugger::Handshake(
-	std::string_view lib, int const hooks, unsigned int const crc) const
-{
+	std::string_view lib, int const hooks, unsigned int const crc) const {
 	bool ret = false;
 
-	if (!lib.empty()) {
+	if (!lib.empty())
+	{
 		//if (!lib.contains("cncnet"))
 		{
-			if (auto const nDllLib = LoadLibrary(lib.data())) {
+			if (auto const nDllLib = LoadLibrary(lib.data()))
+			{
 				if (auto const func = reinterpret_cast<SYRINGEHANDSHAKEFUNC>(
 					GetProcAddress(nDllLib, "SyringeHandshake")))
 				{
@@ -1169,19 +1216,22 @@ bool SyringeDebugger::Handshake(
 					shInfo->cchMessage = static_cast<int>(Size);
 					shInfo->Message = buffer.data();
 
-					if (auto const res = func(shInfo.get()); SUCCEEDED(res)) {
+					if (auto const res = func(shInfo.get()); SUCCEEDED(res))
+					{
 						buffer.back() = 0;
 						Log::WriteLine(
 							__FUNCTION__ ": Answers \"%s\" (%X)", buffer.data(), res);
 						ret = (res == S_OK);
 					}
-					else {
+					else
+					{
 						// don't use any properties of shInfo.
 						Log::WriteLine(__FUNCTION__ ": Failed (%X)", res);
 						ret = false;
 					}
 				}
-				else {
+				else
+				{
 					Log::WriteLine(__FUNCTION__ ": Not available.");
 				}
 
