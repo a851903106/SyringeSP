@@ -13,6 +13,7 @@
 #include <numeric>
 
 #include <DbgHelp.h>
+#include <Psapi.h>
 
 //using namespace std;
 std::vector<std::string> SyringeDebugger::IgnoredDll;
@@ -83,7 +84,6 @@ struct Assembly {
 	};
 	static constexpr size_t sizeof_jmp_code_ = sizeof(jmp_code_);
 
-
 	static constexpr BYTE const load_library[] = {
 		0x50, // push eax
 		0x51, // push ecx
@@ -102,6 +102,17 @@ struct Assembly {
 		INT3, NOP // int3 and some padding
 	};
 	static constexpr size_t sizeof_load_library = sizeof(load_library);
+
+	static constexpr BYTE const load_library_NoProc[] = {
+		0x68, INIT, INIT, INIT, INIT, // push offset pdLibName
+		0xFF, 0x15, INIT, INIT, INIT, INIT, // call pImLoadLibrary
+		//INT3, NOP , NOP , NOP , NOP , NOP , // int3 and some padding
+		//NOP, NOP, NOP, NOP, NOP, NOP, NOP,
+		//NOP, NOP, NOP, NOP, NOP, NOP, NOP, 
+		//NOP, NOP, NOP, NOP, NOP, NOP, NOP ,
+		//NOP, NOP
+	};
+	static constexpr size_t sizeof_load_library_NoProc = sizeof(load_library_NoProc);
 
 	//constexpr static BYTE const hook_code_call_old[] = {
 	//	0x60, 0x9C, // PUSHAD, PUSHFD
@@ -314,21 +325,14 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 			else
 			{
 				auto const& hook = *loop_LoadLibrary;
-				if (hook->hookaddr != 0)
+
+				ReadMem(&GetData()->ProcAddress, &hook->proc_address, 4);
+
+				if (!hook->proc_address)
 				{
-
-					ReadMem(&GetData()->ProcAddress, &hook->proc_address, 4);
-
-					if (!hook->proc_address)
-					{
-						Log::WriteLine(
-							__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
-							"- %s", hook->lib, hook->proc);
-					}
-					//else
-					//{
-					//	Log::WriteLine(__FUNCTION__ ": %s [0x%x , %s , %d]" , hook->lib , hook->hookaddr , hook->proc , hook->num_overridden);
-					//} 
+					Log::WriteLine(
+						__FUNCTION__ ": Could not retrieve ProcAddress for: %s "
+						"- %s", hook->lib, hook->proc);
 				}
 
 				++loop_LoadLibrary;
@@ -337,14 +341,36 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 			if (loop_LoadLibrary != v_AllHooks.end())
 			{
 				auto const& hook = *loop_LoadLibrary;
+				auto pData = this->GetData();
 
-				PatchMem(&GetData()->LibName, hook->lib, MaxNameLength);
-				PatchMem(&GetData()->ProcName, hook->proc, MaxNameLength);
+				PatchMem(&pData->LibName, hook->lib, MaxNameLength);
+				
+				if (_strcmpi(hook->lib , "cncnet5.dll") == 0) {
+					char dllMain[] = { "DllMain" };
 
-				context.Eip = reinterpret_cast<DWORD>(&GetData()->LoadLibraryFunc);
-			
+					PatchMem(&pData->ProcName, dllMain, sizeof(dllMain));
+
+					//
+					//	std::array<BYTE, Assembly::sizeof_load_library> dummy;
+					//	ApplyPatch(dummy.data(), Assembly::load_library_NoProc);
+					//	ApplyPatch(dummy.data() + 0x01, &pData->LibName);
+					//	ApplyPatch(dummy.data() + 0x07, this->pImLoadLibrary);
+					//
+					//	if (!PatchMem(&pData->LoadLibraryFunc, dummy.data(), Assembly::sizeof_load_library)
+					//		) {
+					//		Log::WriteLine(__FUNCTION__ ": LoadLibrary patching failed !");
+					//	} else {
+					//		Log::WriteLine(__FUNCTION__ ": Dll[%s] Has no proper proc_addres of [%s] patching the LoadLibrary to alternative version !", hook->lib , hook->proc);
+					//	}
+				} else {
+					PatchMem(&pData->ProcName, hook->proc, MaxNameLength);
+				}
+
+				context.Eip = reinterpret_cast<DWORD>(&pData->LoadLibraryFunc);
+
 				if (SyringeDebugger::LoggerOptions::LogLoadLibFunc)
 					Log::WriteLine(__FUNCTION__ ": Executing LoadLibraryFunc [proc : %s - Lib :%s]", hook->proc, hook->lib);
+
 			}
 			else
 			{
@@ -363,7 +389,6 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 
 			return DBG_CONTINUE;
 		}
-
 
 		if (exceptAddr == pcEntryPoint)
 		{
@@ -577,7 +602,7 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 			auto const& threadInfo = Threads[dbgEvent.dwThreadId];
 			HANDLE currentThread = threadInfo.Thread;
 
-			char const* access = nullptr;
+			char const* access = "";
 			switch (dbgEvent.u.Exception.ExceptionRecord.ExceptionInformation[0])
 			{
 			case 0: access = "read from"; break;
@@ -588,6 +613,34 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 			Log::WriteLine("\tThe process tried to %s 0x%08X.",
 				access,
 				dbgEvent.u.Exception.ExceptionRecord.ExceptionInformation[1]);
+
+			if (pInfo.hProcess != INVALID_HANDLE_VALUE)
+			{
+				// Enumerate the loaded modules in the process
+				HMODULE hModules[1024];
+				DWORD cbNeeded;
+
+				if (EnumProcessModules(pInfo.hProcess , hModules, sizeof(hModules), &cbNeeded))
+				{
+					const int moduleCount = static_cast<int>(cbNeeded / sizeof(HMODULE));
+					for (int i = 0; i < moduleCount; ++i)
+					{
+						// Get the base name of the module
+						CHAR moduleName[MAX_PATH] = { 0 };
+						if (GetModuleBaseNameA(pInfo.hProcess , hModules[i], moduleName, sizeof(moduleName)))
+						{
+							// Get information about the module
+							MODULEINFO info = { 0 };
+							if (GetModuleInformation(pInfo.hProcess , hModules[i], &info, sizeof(info)))
+							{
+								_strlwr_s(moduleName);
+								moduleName[0] &= ~0x20; // LOL HACK to uppercase a letter
+								Log::WriteLine("Loaded Module for [%d] %d[%s - %x]" , pInfo.dwProcessId , i ,moduleName , (uintptr_t)info.lpBaseOfDll);		
+							}		
+						}
+					}
+				}		
+			}
 
 			CONTEXT context;
 			context.ContextFlags = CONTEXT_FULL;
@@ -632,33 +685,42 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 void SyringeDebugger::Run(std::string_view const arguments) {
 	constexpr auto AllocDataSize = sizeof(AllocData);
 
-	static_assert(AllocDataSize == 580u, "InvalidAllocSize");
 	Log::WriteLine(
 		__FUNCTION__ ": Running process to debug. cmd = \"%s %.*s\"",
 		exe.c_str(), printable(arguments));
 	DebugProcess(arguments);
 
+	BYTE buffer;
+	if (!((DWORD)this->pcEntryPoint) || !ReadMem(this->pcEntryPoint, &buffer, 1u))
+	{
+		Log::WriteLine(
+			__FUNCTION__ ": Invalid EntryPoint Address");
+
+		return;
+	}
+
 	Log::WriteLine(__FUNCTION__ ": Allocating 0x%u bytes...", AllocDataSize);
 	pAlloc = AllocMem(nullptr, AllocDataSize);
 
-	Log::WriteLine(__FUNCTION__ ": pAlloc = 0x%08X", pAlloc.get());
+	const auto pData = this->GetData();
+	Log::WriteLine(__FUNCTION__ ": pAlloc = 0x%08X", pData);
 
 	// write DLL loader code
 	Log::WriteLine(__FUNCTION__ ": Writing DLL loader & caller code...");
 
+	std::array<BYTE, AllocDataSize> dummy;
+	ApplyPatch(dummy.data(), Assembly::load_library);
+	ApplyPatch(dummy.data() + 0x04, &pData->LibName);
+	ApplyPatch(dummy.data() + 0x0A, pImLoadLibrary);
+	ApplyPatch(dummy.data() + 0x13, &pData->ProcName);
+	ApplyPatch(dummy.data() + 0x1A, pImGetProcAddress);
+	ApplyPatch(dummy.data() + 0x1F, &pData->ProcAddress);
 
-	std::array<BYTE, AllocDataSize> data{};
-	static_assert(AllocData::CodeSize >= Assembly::sizeof_load_library, "Invalid Size !");
-	const auto pData = this->GetData();
-	ApplyPatch(data.data(), Assembly::load_library);
-	ApplyPatch(data.data() + 0x04, &pData->LibName);
-	ApplyPatch(data.data() + 0x0A, pImLoadLibrary);
-	ApplyPatch(data.data() + 0x13, &pData->ProcName);
-	ApplyPatch(data.data() + 0x1A, pImGetProcAddress);
-	ApplyPatch(data.data() + 0x1F, &pData->ProcAddress);
-	constexpr size_t datasize = data.size();
-
-	if (!PatchMem(pAlloc, data.data(), datasize))
+	//BYTE buffer;
+	if (!PatchMem(pData, dummy.data(), AllocDataSize)
+		//|| !*((DWORD*)this->pcEntryPoint) 
+		//|| !ReadMem(this->pcEntryPoint, &buffer, 1u)
+		)
 	{
 		Log::WriteLine(__FUNCTION__ ": LoadLibrary patching failed !");
 		return;
@@ -828,6 +890,8 @@ void SyringeDebugger::RetrieveInfo() {
 	}
 
 	Log::WriteLine(__FUNCTION__ ": Executable information successfully retrieved.");
+	Log::WriteLine(__FUNCTION__ ": Opening %s to determine imports.", exe.c_str());
+
 	Log::WriteLine("\texe = %s", exe.c_str());
 	Log::WriteLine("\tpImLoadLibrary = 0x%08X", pImLoadLibrary);
 	Log::WriteLine("\tpImGetProcAddress = 0x%08X", pImGetProcAddress);
@@ -836,12 +900,6 @@ void SyringeDebugger::RetrieveInfo() {
 	Log::WriteLine("\tdwExeCRC = 0x%08X", dwExeCRC);
 	Log::WriteLine("\tdwTimestamp = 0x%08X", dwTimeStamp);
 	Log::WriteLine();
-
-	Log::WriteLine(__FUNCTION__ ": Opening %s to determine imports.", exe.c_str());
-
-	//MessageBoxA(
-	//	nullptr, "Opening gamemd to determine imports.",
-	//	__FUNCTION__, MB_OK | MB_ICONINFORMATION);
 }
 
 #include <sstream>

@@ -9,7 +9,7 @@
 #include "ini-rw/include/IniFile.hpp"
 
 int Run(std::string_view const arguments) {
-	constexpr auto const VersionString = "Syringe 0.7.3.5 - Custom";
+	constexpr auto const VersionString = "Syringe 0.7.3.8 - Custom";
 
 	InitCommonControls();
 
@@ -81,13 +81,12 @@ int Run(std::string_view const arguments) {
 			"WinMain: Trying to load executable file \"%.*s\"...",
 			printable(command.executable));
 		Log::WriteLine();
-
-		SyringeDebugger Debugger{ command.executable };
+		auto Debugger = std::make_unique<SyringeDebugger>(command.executable);
 		failure = "Could not run executable.";
 
 		Log::WriteLine("WinMain: SyringeDebugger::FindDLLs();");
 		Log::WriteLine();
-		Debugger.FindDLLs();
+		Debugger->FindDLLs();
 
 		Log::WriteLine(
 			"WinMain: SyringeDebugger::Run(\"%.*s\");",
@@ -97,7 +96,7 @@ int Run(std::string_view const arguments) {
 		//MessageBoxA(
 		//	nullptr, "Syringe  Halted",
 		//	VersionString, MB_OK | MB_ICONINFORMATION);
-		Debugger.Run(command.arguments);
+		Debugger->Run(command.arguments);
 		Log::WriteLine("WinMain: SyringeDebugger::Run finished.");
 		Log::WriteLine("WinMain: Exiting on success.");
 		return ERROR_SUCCESS;

@@ -193,8 +193,8 @@ private:
 
 	// data addresses
 	struct AllocData {
-		static constexpr size_t CodeSize = 0x39u;
-		std::byte LoadLibraryFunc[CodeSize];
+		static constexpr size_t CodeSize = 0x28u;
+		BYTE LoadLibraryFunc[CodeSize];
 		void* ProcAddress;
 		void* ReturnEIP;
 		char LibName[MaxNameLength];
