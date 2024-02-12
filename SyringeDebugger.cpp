@@ -1160,11 +1160,41 @@ bool SyringeDebugger::ParseHooksSection(
 		else
 		{
 			Log::WriteLine(__FUNCTION__ ": Bytes read failed");
-			return false;
+			DllPatcher patchSection{};
+
+			if (DLL.ReadBytes(ptr, sizeof(DllPatcher), &patchSection)) {
+				Log::WriteLine(__FUNCTION__ ": reading patch [%x - %d]" , patchSection.offset , patchSection.size);
+			}
+			else
+			{
+				return false;
+			}
 		}
+
+
 	}
 
 	return true;
+}
+
+void SyringeDebugger::ParsePatchSection(
+	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks) {
+	auto const base = DLL.GetImageBase();
+	auto const filename = std::string_view(DLL.GetFilename());
+
+	auto const begin = hooks.PointerToRawData;
+	auto const end = begin + hooks.SizeOfRawData;
+
+	std::string hookName{};
+	hookName.reserve(0x100);
+
+	for (auto ptr = begin; ptr < end; ptr += sizeof(DllPatcher))
+	{
+		DllPatcher patchSection{};
+		if (DLL.ReadBytes(ptr, sizeof(DllPatcher), &patchSection)) {
+			Log::WriteLine(__FUNCTION__ ": reading patch [%x - %d]", patchSection.offset, patchSection.size);
+		}
+	}
 }
 
 bool SyringeDebugger::ParseOverrideHooksSection(

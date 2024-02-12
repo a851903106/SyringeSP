@@ -281,6 +281,7 @@ private:
 	bool CanHostDLL(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hosts) const;
 	bool ParseHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookBuffer& buffer);
 	bool ParseOverrideHooksSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks, HookOverrideBuffer& hookneedtoremove, HookBuffer& bufferAdd);
+	void ParsePatchSection(PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks);
 	bool ParsePatchSection(PortableExecutable const& DLL);
 
 	bool Handshake(std::string_view lib, int hooks, unsigned int crc) const;
