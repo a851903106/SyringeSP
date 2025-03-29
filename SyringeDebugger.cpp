@@ -466,19 +466,19 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 								//found jump or call opcode
 								if (overridenMem[0] == Assembly::CALL || overridenMem[0] == Assembly::JMP || overridenMem[0] == Assembly::JLE)
 								{
-									Log::WriteLine(
-										__FUNCTION__ ":Hook at [0x%x = %s , %d] Possibly destroying jmp or call", breakpoints_entry, hook.proc, hook.num_overridden);
+									//Log::WriteLine(
+									//	__FUNCTION__ ":Hook at [0x%x = %s , %d] Possibly destroying jmp or call", breakpoints_entry, hook.proc, hook.num_overridden);
 
 									needProtect = true;
 								}
 
 								checked = true;
 							}
-							else if (!hook.num_overridden)
-							{
-								Log::WriteLine(
-									__FUNCTION__ ":Hook at [0x%x = %s , %d] cannot be identified because it 0 overriden jmp or call", breakpoints_entry, hook.proc, hook.num_overridden);
-							}
+							//else if (!hook.num_overridden)
+							//{
+							//	Log::WriteLine(
+							//		__FUNCTION__ ":Hook at [0x%x = %s , %d] cannot be identified because it 0 overriden jmp or call", breakpoints_entry, hook.proc, hook.num_overridden);
+							//}
 
 							// write hook caller code
 							ApplyPatch(memoryptr, Assembly::hook_code_call, 33u); // code
@@ -685,9 +685,9 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent) {
 void SyringeDebugger::Run(std::string_view const arguments) {
 	constexpr auto AllocDataSize = sizeof(AllocData);
 
-	Log::WriteLine(
-		__FUNCTION__ ": Running process to debug. cmd = \"%s %.*s\"",
-		exe.c_str(), printable(arguments));
+	//Log::WriteLine(
+		//__FUNCTION__ ": Running process to debug. cmd = \"%s %.*s\"",
+		//exe.c_str(), printable(arguments));
 	DebugProcess(arguments);
 
 	BYTE buffer;
@@ -914,77 +914,95 @@ void SyringeDebugger::FindDLLs() {
 	Breakpoints.clear();
 	HookOverrideBuffer buffer_remove;
 
-	for (auto file = FindFile("*.dll"); file; ++file)
+	HMODULE ExtraDLL = LoadLibraryA("Syringe.dll");
+
+	typedef bool (*Start)();
+	Start ExtraDLLstart = (Start)GetProcAddress(ExtraDLL, "Start");
+
+	typedef bool (*CheckFiles)();
+	CheckFiles ExtraDLLcheckFiles = (CheckFiles)GetProcAddress(ExtraDLL, "CheckFiles");
+
+	typedef bool (*CanSyringe)(std::string filename);
+	CanSyringe ExtraDLLcanSyringe = (CanSyringe)GetProcAddress(ExtraDLL, "CanSyringe");
+
+	if (ExtraDLLstart() && ExtraDLLcheckFiles())
 	{
-		std::string_view const fn(file->cFileName);
-
-		if (!IgnoredDll.empty())
+		for (auto file = FindFile("*.dll"); file; ++file)
 		{
-			const auto Iter = std::find_if(IgnoredDll.begin(), IgnoredDll.end(), [&](const auto& nStr) { return nStr == fn; });
-			if (Iter != IgnoredDll.end())
-			{
-				Log::WriteLine(__FUNCTION__ ": Ignoring DLL: \"%.*s\"", printable(fn));
+			std::string_view const fn(file->cFileName);
+
+			if (!ExtraDLLcanSyringe(file->cFileName))
 				continue;
-			}
-		}
-		//Log::WriteLine(
-		//	__FUNCTION__ ": Potential DLL: \"%.*s\"", printable(fn));
 
-		try
-		{
-			PortableExecutable const DLL{ fn };
-			HookBuffer buffer;
-
-			bool canLoad = false;
-			if (auto const hooks = DLL.FindSection(".syhks00"))
+			if (!IgnoredDll.empty())
 			{
-				canLoad = ParseHooksSection(DLL, *hooks, buffer);
-			}
-
-			if (canLoad)
-			{
-				Log::WriteLine(
-					__FUNCTION__ ": Recognized DLL: \"%.*s\"", printable(fn));
-
-				if (auto const hooks = DLL.FindSection(".syhks01"))
+				const auto Iter = std::find_if(IgnoredDll.begin(), IgnoredDll.end(), [&](const auto& nStr) { return nStr == fn; });
+				if (Iter != IgnoredDll.end())
 				{
-					if (ParseOverrideHooksSection(DLL, *hooks, buffer_remove, buffer))
-						Log::WriteLine(
-						__FUNCTION__ ": Found Override Hook Section : \"%.*s\"", printable(fn));
-				}
-
-				if (auto const res = Handshake(
-					DLL.GetFilename(), static_cast<int>(buffer.count),
-					buffer.checksum.value()))
-				{
-					canLoad = res;
-				}
-				else if (auto const hosts = DLL.FindSection(".syexe00"))
-				{
-					canLoad = CanHostDLL(DLL, *hosts);
+					Log::WriteLine(__FUNCTION__ ": Ignoring DLL: \"%.*s\"", printable(fn));
+					continue;
 				}
 			}
+			//Log::WriteLine(
+			//	__FUNCTION__ ": Potential DLL: \"%.*s\"", printable(fn));
 
-			if (canLoad)
+			try
 			{
-				for (auto const& [eip, hooks] : buffer.hooks)
+				PortableExecutable const DLL{ fn };
+				HookBuffer buffer;
+
+				bool canLoad = false;
+				if (auto const hooks = DLL.FindSection(".syhks00"))
 				{
-					auto& h = Breakpoints[eip];
-					h.p_caller_code.clear();
-					h.original_opcode = 0x00;
-					h.hooks.insert(h.hooks.end(), hooks.begin(), hooks.end());
+					canLoad = ParseHooksSection(DLL, *hooks, buffer);
+				}
+
+				if (canLoad)
+				{
+					Log::WriteLine(
+						__FUNCTION__ ": Recognized DLL: \"%.*s\"", printable(fn));
+
+					if (auto const hooks = DLL.FindSection(".syhks01"))
+					{
+						if (ParseOverrideHooksSection(DLL, *hooks, buffer_remove, buffer))
+							Log::WriteLine(
+								__FUNCTION__ ": Found Override Hook Section : \"%.*s\"", printable(fn));
+					}
+
+					if (auto const res = Handshake(
+						DLL.GetFilename(), static_cast<int>(buffer.count),
+						buffer.checksum.value()))
+					{
+						canLoad = res;
+					}
+					else if (auto const hosts = DLL.FindSection(".syexe00"))
+					{
+						canLoad = CanHostDLL(DLL, *hosts);
+					}
+				}
+
+				if (canLoad)
+				{
+					for (auto const& [eip, hooks] : buffer.hooks)
+					{
+						auto& h = Breakpoints[eip];
+						h.p_caller_code.clear();
+						h.original_opcode = 0x00;
+						h.hooks.insert(h.hooks.end(), hooks.begin(), hooks.end());
+					}
+				}
+				else if (!buffer.hooks.empty())
+				{
+					//Log::WriteLine(
+					//	__FUNCTION__ ": DLL load was prevented: \"%.*s\"",
+					//	printable(fn));
 				}
 			}
-			else if (!buffer.hooks.empty())
+			catch (...)
 			{
-				Log::WriteLine(
-					__FUNCTION__ ": DLL load was prevented: \"%.*s\"",
-					printable(fn));
+				//Log::WriteLine(
+				//	__FUNCTION__ ": DLL Parse failed: \"%.*s\"", printable(fn));
 			}
-		} catch (...)
-		{
-			Log::WriteLine(
-				__FUNCTION__ ": DLL Parse failed: \"%.*s\"", printable(fn));
 		}
 	}
 
@@ -998,6 +1016,7 @@ void SyringeDebugger::FindDLLs() {
 
 			auto const nTempData = convert_int(data.hookaddr);
 
+			/*
 			if ((nTempData.size() + 1) != 8)
 			{
 				Log::WriteLine(__FUNCTION__ ": Found Hook with less or more than 8 characters , it maybe invalid one [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
@@ -1009,13 +1028,13 @@ void SyringeDebugger::FindDLLs() {
 				Log::WriteLine(__FUNCTION__ ": Found Hook with less than 5 bytes num overriden , it maybe better to move the hook location if possible [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
 			else if (data.num_overridden > 10)
 				Log::WriteLine(__FUNCTION__ ": Found Hook with num overriden more than 10 [%s][0x%x , %s , %d].", data.lib, data.hookaddr, data.proc, data.num_overridden);
+			*/
 
 			v_AllHooks.push_back(&data);
 		}
 
-		if (it.second.hooks.size() > 1)
-			Log::WriteLine(__FUNCTION__ ":[0x%x , %s , %d] Is Hooked by %d function !.", it.second.hooks[0].hookaddr, it.second.hooks[0].proc, it.second.hooks[0].num_overridden, it.second.hooks.size());
-
+		//if (it.second.hooks.size() > 1)
+		//	Log::WriteLine(__FUNCTION__ ":[0x%x , %s , %d] Is Hooked by %d function !.", it.second.hooks[0].hookaddr, it.second.hooks[0].proc, it.second.hooks[0].num_overridden, it.second.hooks.size());
 	}
 
 	Log::WriteLine(__FUNCTION__ ": Done (%d hooks added).", v_AllHooks.size());
@@ -1179,7 +1198,7 @@ bool SyringeDebugger::ParseHooksSection(
 
 void SyringeDebugger::ParsePatchSection(
 	PortableExecutable const& DLL, IMAGE_SECTION_HEADER const& hooks) {
-	auto const base = DLL.GetImageBase();
+	//auto const base = DLL.GetImageBase();
 	auto const filename = std::string_view(DLL.GetFilename());
 
 	auto const begin = hooks.PointerToRawData;

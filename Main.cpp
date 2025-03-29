@@ -9,7 +9,7 @@
 #include "ini-rw/include/IniFile.hpp"
 
 int Run(std::string_view const arguments) {
-	constexpr auto const VersionString = "Syringe 0.7.3.8 - Custom";
+	constexpr auto const VersionString = "Syringe 0.7.3.8";
 
 	InitCommonControls();
 
@@ -19,7 +19,7 @@ int Run(std::string_view const arguments) {
 	Log::WriteLine(VersionString);
 	Log::WriteLine("===============");
 	Log::WriteLine();
-	Log::WriteLine("WinMain: arguments = \"%.*s\"", printable(arguments));
+	//Log::WriteLine("WinMain: arguments = \"%.*s\"", printable(arguments));
 
 	Log::WriteLine(
 		"WinMain: try to find syringeconfig");
@@ -88,9 +88,9 @@ int Run(std::string_view const arguments) {
 		Log::WriteLine();
 		Debugger->FindDLLs();
 
-		Log::WriteLine(
-			"WinMain: SyringeDebugger::Run(\"%.*s\");",
-			printable(command.arguments));
+		//Log::WriteLine(
+		//	"WinMain: SyringeDebugger::Run(\"%.*s\");",
+		//	printable(command.arguments));
 		Log::WriteLine();
 
 		//MessageBoxA(
